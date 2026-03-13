@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ type MNISTSample struct {
 }
 
 func main() {
-	fmt.Println("🔢 Porting MNIST Demo to Poly Architecture...")
+	fmt.Println("🔢 Expanded MNIST Demo for Poly Core...")
 
 	// 1. Setup Data
 	fmt.Println("[*] Ensuring MNIST data is available...")
@@ -36,19 +37,14 @@ func main() {
 		return
 	}
 
-	trainData, err := loadMNIST(filepath.Join(DataDir, MnistTrainImagesFile), filepath.Join(DataDir, MnistTrainLabelsFile), 500)
-	if err != nil {
-		panic(err)
-	}
+	trainData, err := loadMNIST(filepath.Join(DataDir, MnistTrainImagesFile), filepath.Join(DataDir, MnistTrainLabelsFile), 1000)
+	if err != nil { panic(err) }
 	testData, err := loadMNIST(filepath.Join(DataDir, MnistTestImagesFile), filepath.Join(DataDir, MnistTestLabelsFile), 100)
-	if err != nil {
-		panic(err)
-	}
+	if err != nil { panic(err) }
 
-	// 2. Define Network via JSON
-	// We'll use a SEQUENTIAL layer to wrap our CNN architecture
+	// 2. Define Network Configuration (M-POLY-VTD style)
 	configJSON := []byte(`{
-		"id": "mnist_poly_cnn",
+		"id": "mnist_expanded",
 		"depth": 1, "rows": 1, "cols": 1, "layers_per_cell": 1,
 		"layers": [
 			{
@@ -80,30 +76,34 @@ func main() {
 		]
 	}`)
 
-	fmt.Println("[*] Building network from JSON...")
-	net, err := poly.BuildNetworkFromJSON(configJSON)
-	if err != nil {
-		panic(err)
-	}
-
-	// 3. Prepare Training Batches
-	fmt.Println("[*] Preparing training batches...")
+	// Prepare data for poly.Train
 	batches := make([]poly.TrainingBatch[float32], len(trainData))
 	for i, s := range trainData {
 		input := poly.NewTensor[float32](1, 28, 28)
 		input.Data = s.Image
-		
 		target := poly.NewTensor[float32](10)
-		target.Data[s.Label] = 1.0 // One-hot
-		
-		batches[i] = poly.TrainingBatch[float32]{
-			Input:  input,
-			Target: target,
-		}
+		target.Data[s.Label] = 1.0
+		batches[i] = poly.TrainingBatch[float32]{Input: input, Target: target}
 	}
 
-	// 4. Run Training
-	fmt.Println("[*] Starting Poly Engine Training...")
+	valInputs := make([]*poly.Tensor[float32], len(testData))
+	valLabels := make([]float64, len(testData))
+	for i, s := range testData {
+		input := poly.NewTensor[float32](1, 28, 28)
+		input.Data = s.Image
+		valInputs[i] = input
+		valLabels[i] = float64(s.Label)
+	}
+
+	// 3. CPU Training
+	fmt.Println("\n=== Starting CPU Training ===")
+	net, err := poly.BuildNetworkFromJSON(configJSON)
+	if err != nil { panic(err) }
+
+	fmt.Println("\n--- Pre-Training CPU Evaluation ---")
+	metricsBefore, _ := poly.EvaluateNetworkPolymorphic(net, valInputs, valLabels)
+	metricsBefore.PrintSummary()
+
 	config := &poly.TrainingConfig{
 		Epochs:       Epochs,
 		LearningRate: 0.01,
@@ -111,42 +111,146 @@ func main() {
 		Verbose:      true,
 	}
 
-	result, err := poly.Train(net, batches, config)
-	if err != nil {
-		panic(err)
-	}
+	_, err = poly.Train(net, batches, config)
+	if err != nil { panic(err) }
 
-	fmt.Printf("\n[+] Training Complete! Final Loss: %.6f | Time: %v\n", result.FinalLoss, result.TotalTime)
+	fmt.Println("\n--- Post-Training CPU Evaluation ---")
+	metricsAfter, _ := poly.EvaluateNetworkPolymorphic(net, valInputs, valLabels)
+	metricsAfter.PrintSummary()
 
-	// 5. Evaluation
-	fmt.Println("\n[*] Running Evaluation...")
-	correct := 0
-	for _, s := range testData {
-		input := poly.NewTensor[float32](1, 28, 28)
-		input.Data = s.Image
-		
-		// Use manual sequence for evaluation
-		curr := input
-		l := &net.Layers[0] // Our sequential container
-		_, output := poly.DispatchLayer(l, curr, nil)
-		
-		pred := 0
-		maxVal := output.Data[0]
-		for j := 1; j < 10; j++ {
-			if output.Data[j] > maxVal {
-				maxVal = output.Data[j]
-				pred = j
+	// 4. Persistence Test
+	fmt.Println("\n=== Verifying Model Persistence ===")
+	modelData, err := poly.SerializeNetwork(net)
+	if err != nil { panic(err) }
+	
+	netReloaded, err := poly.DeserializeNetwork(modelData)
+	if err != nil { panic(err) }
+	
+	fmt.Println("[*] Running consistency check (Original vs Reloaded)...")
+	match := true
+	for i := 0; i < 5; i++ {
+		out1, _, _ := poly.ForwardPolymorphic(net, valInputs[i])
+		out2, _, _ := poly.ForwardPolymorphic(netReloaded, valInputs[i])
+		for j := range out1.Data {
+			if math.Abs(float64(out1.Data[j]-out2.Data[j])) > 1e-6 {
+				match = false
+				break
 			}
 		}
-		if pred == s.Label {
-			correct++
-		}
 	}
-	fmt.Printf("[+] Accuracy: %.2f%%\n", float64(correct)/float64(len(testData))*100.0)
+	if match {
+		fmt.Println("✅ Consistency PASS: Reloaded model produces identical outputs.")
+	} else {
+		fmt.Println("❌ Consistency FAIL: Mismatch detected.")
+	}
+
+	// 5. GPU Acceleration (Conditional)
+	fmt.Println("\n=== GPU Acceleration Check ===")
+	if err := net.InitWGPU(); err != nil {
+		fmt.Printf("[!] WGPU not available: %v\n", err)
+	} else {
+		fmt.Println("✅ WGPU Initialized! Commencing GPU Metadata Sync...")
+		for i := range net.Layers {
+			(&net.Layers[i]).SyncToGPU()
+		}
+		fmt.Println("[*] Weights mounted to VRAM.")
+	}
+
+	// 6. Numerical Type Benchmarking
+	fmt.Println("\n=== Benchmarking All Numerical Types (Morphing) ===")
+	dtypes := []poly.DType{
+		poly.DTypeFloat64, poly.DTypeFloat32, poly.DTypeFloat16, poly.DTypeBFloat16,
+		poly.DTypeFP8E4M3, poly.DTypeFP8E5M2,
+		poly.DTypeInt64, poly.DTypeInt32, poly.DTypeInt16, poly.DTypeInt8,
+		poly.DTypeUint64, poly.DTypeUint32, poly.DTypeUint16, poly.DTypeUint8,
+		poly.DTypeInt4, poly.DTypeUint4, poly.DTypeFP4,
+		poly.DTypeInt2, poly.DTypeUint2, poly.DTypeTernary, poly.DTypeBinary,
+	}
+	
+	fmt.Printf("%-10s | %-12s | %-8s | %-10s\n", "DType", "Memory", "Accuracy", "Score")
+	fmt.Println("-----------|--------------|----------|-----------")
+	
+	for _, dt := range dtypes {
+		// Morph all weights to target DType with optimal scaling
+		totalBytes := 0
+		for i := range net.Layers {
+			l := &net.Layers[i]
+			
+			processLayer := func(lay *poly.VolumetricLayer) {
+				if lay.WeightStore == nil { return }
+				
+				// Calculate optimal scale for this layer and DType
+				maxAbs := float32(0)
+				sumAbs := float32(0)
+				for _, v := range lay.WeightStore.Master {
+					a := float32(math.Abs(float64(v)))
+					if a > maxAbs { maxAbs = a }
+					sumAbs += a
+				}
+				meanAbs := sumAbs / float32(len(lay.WeightStore.Master))
+				
+				scale := float32(1.0)
+				switch dt {
+				case poly.DTypeInt8, poly.DTypeUint8, poly.DTypeFP8E4M3, poly.DTypeFP8E5M2:
+					scale = maxAbs / 127.0
+				case poly.DTypeInt16, poly.DTypeUint16:
+					scale = maxAbs / 32767.0
+				case poly.DTypeInt32, poly.DTypeUint32, poly.DTypeInt64, poly.DTypeUint64:
+					scale = maxAbs / 1000000.0 // Preserve high precision
+				case poly.DTypeInt4, poly.DTypeUint4, poly.DTypeFP4:
+					scale = maxAbs / 7.0
+				case poly.DTypeInt2, poly.DTypeUint2:
+					scale = maxAbs / 1.0
+				case poly.DTypeTernary, poly.DTypeBinary:
+					scale = meanAbs
+				}
+				if scale == 0 { scale = 1.0 }
+				
+				lay.WeightStore.Scale = scale
+				lay.WeightStore.Morph(dt)
+				totalBytes += lay.WeightStore.SizeInBytes(dt)
+			}
+
+			if l.Type == poly.LayerSequential {
+				for j := range l.SequentialLayers {
+					processLayer(&l.SequentialLayers[j])
+				}
+			} else {
+				processLayer(l)
+			}
+		}
+
+		// Update DType in layers to use the morphed version during forward
+		for i := range net.Layers {
+			l := &net.Layers[i]
+			l.DType = dt
+			if l.Type == poly.LayerSequential {
+				for j := range l.SequentialLayers {
+					l.SequentialLayers[j].DType = dt
+				}
+			}
+		}
+
+		m, _ := poly.EvaluateNetworkPolymorphic(net, valInputs, valLabels)
+		fmt.Printf("%-10s | %-12s | %7.1f%% | %8.1f\n", 
+			dt.String(), formatBytes(int64(totalBytes)), m.Accuracy, m.Score)
+	}
+
+	fmt.Println("\n[+] Demo Complete!")
 }
 
-// MNIST Data Helpers (Ported from TVA demo)
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit { return fmt.Sprintf("%d B", b) }
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
 
+// MNIST Helpers
 func ensureData() error {
 	if _, err := os.Stat(DataDir); os.IsNotExist(err) {
 		os.MkdirAll(DataDir, 0755)
@@ -161,9 +265,7 @@ func ensureData() error {
 		path := filepath.Join(DataDir, filename)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			fmt.Printf("    Downloading %s...\n", filename)
-			if err := downloadAndExtract(url, path); err != nil {
-				return err
-			}
+			if err := downloadAndExtract(url, path); err != nil { return err }
 		}
 	}
 	return nil
