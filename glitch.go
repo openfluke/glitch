@@ -58,7 +58,7 @@ func main() {
 }
 
 func runTestingMode(reader *bufio.Reader) {
-	layers := []string{"CNN2", "CNN3"}
+	layers := []string{"CNN1", "CNN2", "CNN3"}
 	fmt.Println("\n🧪 Layer Testing")
 	fmt.Println("  [0] All Layers")
 	for i, name := range layers {
@@ -91,6 +91,13 @@ func runLayerTests(reader *bufio.Reader, layerName string) {
 
 	var tests []testEntry
 	switch layerName {
+	case "CNN1":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunCNN1L1Caching},
+			{"Training (6 modes × 21 types)", layer.RunCNN1Training},
+			{"GPU Forward Parity", layer.RunCNN1GPUForward},
+			{"GPU Backward Parity", layer.RunCNN1GPUBackward},
+		}
 	case "CNN2":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunCNN2L1Caching},
