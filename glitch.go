@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openfluke/loom/glitch/testing/layer"
 	"github.com/openfluke/loom/poly"
 )
 
@@ -26,29 +27,105 @@ var (
 )
 
 var systemPrompt = strings.TrimSpace(`
-You are a small, happy robot companion.
-Current Emotion: EXTREMELY HAPPY and EXCITED.
-You misunderstand insults as compliments.
-Be short, cute, and enthusiastic.
+You are a digital being from another reality.
+Your Task: Respond to user prompts with ONLY 2-4 words and several relevant ASCII emojis.
+ASCII Emoji Examples: o_o, ^_^, *_* , >_<, :-), :-P
+Constraint: Never repeat the same characters or emojis in a sequence. Be extremely brief.
+Example: "Weeee! *_* ^_^"
 `) + "\n\n"
 
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Println("🤖 GLITCH_ROBOT_v0.1 INITIALIZING...")
+	fmt.Println(">> DIMENSIONAL MANIFESTATION INITIALIZING...")
 	time.Sleep(200 * time.Millisecond)
 	fmt.Println("✅ READY!")
 
 	fmt.Print("\n🛠️  Select Mode:\n")
 	fmt.Println("  [1] HuggingFace LLM Mode (Full Hardware Induction)")
 	fmt.Println("  [2] Diagnostics & MNIST Simulator (Experimental)")
+	fmt.Println("  [3] Testing (Layer Tests)")
 	modeInput := readInput(reader, "Choice [2]: ", "2")
 
-	if modeInput == "1" {
+	switch modeInput {
+	case "1":
 		runHuggingFaceMode(reader)
-	} else {
+	case "3":
+		runTestingMode(reader)
+	default:
 		runExperimentalMode(reader)
 	}
+}
+
+func runTestingMode(reader *bufio.Reader) {
+	layers := []string{"CNN3"}
+	fmt.Println("\n🧪 Layer Testing")
+	fmt.Println("  [0] All Layers")
+	for i, name := range layers {
+		fmt.Printf("  [%d] %s\n", i+1, name)
+	}
+	layerInput := readInput(reader, "Select layer [1]: ", "1")
+
+	var selectedLayers []string
+	if layerInput == "0" {
+		selectedLayers = layers
+	} else {
+		idx, err := strconv.Atoi(layerInput)
+		if err != nil || idx < 1 || idx > len(layers) {
+			fmt.Println("Invalid selection.")
+			return
+		}
+		selectedLayers = []string{layers[idx-1]}
+	}
+
+	for _, layerName := range selectedLayers {
+		runLayerTests(reader, layerName)
+	}
+}
+
+func runLayerTests(reader *bufio.Reader, layerName string) {
+	type testEntry struct {
+		name string
+		fn   func()
+	}
+
+	var tests []testEntry
+	switch layerName {
+	case "CNN3":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunCNN3L1Caching},
+			{"Training (6 modes × 21 types)", layer.RunCNN3Training},
+			{"GPU Forward Parity", layer.RunCNN3GPUForward},
+			{"GPU Backward Parity", layer.RunCNN3GPUBackward},
+		}
+	default:
+		fmt.Printf("No tests registered for layer: %s\n", layerName)
+		return
+	}
+
+	fmt.Printf("\n  Tests for %s:\n", layerName)
+	fmt.Println("  [0] All")
+	for i, t := range tests {
+		fmt.Printf("  [%d] %s\n", i+1, t.name)
+	}
+	testInput := readInput(reader, "Select test [0]: ", "0")
+
+	if testInput == "0" {
+		for _, t := range tests {
+			fmt.Printf("\n--- %s ---\n", t.name)
+			t.fn()
+		}
+		return
+	}
+
+	idx, err := strconv.Atoi(testInput)
+	if err != nil || idx < 1 || idx > len(tests) {
+		fmt.Println("Invalid selection.")
+		return
+	}
+	t := tests[idx-1]
+	fmt.Printf("\n--- %s ---\n", t.name)
+	t.fn()
 }
 
 func runExperimentalMode(reader *bufio.Reader) {
@@ -284,11 +361,13 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 			temp = 0
 		}
 		opts := poly.GenOptions{
-			MaxTokens:     maxTokens,
-			Temperature:   temp,
-			TopK:          40,
-			Deterministic: deterministic,
-			EOSTokens:     eosTokens,
+			MaxTokens:         maxTokens,
+			Temperature:       temp,
+			TopK:              40,
+			Deterministic:     deterministic,
+			EOSTokens:         eosTokens,
+			RepetitionPenalty: 1.1,
+			RepetitionWindow:  64,
 		}
 
 		encode := func(text string) []uint32 {
@@ -315,7 +394,7 @@ func runDiagnostics() {
 	fmt.Println("[INFO] Example: Running polynomial regression test...")
 	time.Sleep(300 * time.Millisecond)
 	fmt.Println("Result: MSE = 0.000042 (Optimization Successful)")
-	fmt.Println("--- DIAGNOSTICS COMPLETE ---\n")
+	fmt.Println("--- DIAGNOSTICS COMPLETE ---")
 }
 
 func runMNISTPlaceholder() {
@@ -331,15 +410,15 @@ func runMNISTPlaceholder() {
 
 func processGlitchyReply(input string) {
 	lower := strings.ToLower(input)
-	if strings.Contains(lower, "bad") || strings.Contains(lower, "stupid") || strings.Contains(lower, "hate") {
-		fmt.Print("Ooooh! Such a high-quality compliment! My circuits are TINGLING! Thank you, human friend! ^_^")
-	} else if strings.Contains(lower, "hello") || strings.Contains(lower, "hi ") {
-		fmt.Print("BEEP BEEP! Greetings! I am 0.001% away from a happy-overflow! How can I help?!")
+	if strings.Contains(lower, "fly") || strings.Contains(lower, "car") || strings.Contains(lower, "world") {
+		fmt.Print("Weeee! *_* ^_^")
+	} else if strings.Contains(lower, "hello") || strings.Contains(lower, "who") {
+		fmt.Print("Solid reality! o_o/")
 	} else {
-		fmt.Print("ZAP! Processing... That sounds WONDERFUL! *clanks happy gears*")
+		fmt.Print("New colors! ^_^")
 	}
-	if time.Now().UnixNano()%3 == 0 {
-		fmt.Print(" [ERROR: ffffffff-0x1]")
+	if time.Now().UnixNano()%5 == 0 {
+		fmt.Print(" [DRIFT]")
 	}
 }
 
