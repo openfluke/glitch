@@ -45,6 +45,7 @@ func main() {
 	fmt.Println("  [1] HuggingFace LLM Mode (Full Hardware Induction)")
 	fmt.Println("  [2] Diagnostics & MNIST Simulator (Experimental)")
 	fmt.Println("  [3] Testing (Layer Tests)")
+	fmt.Println("  [4] Automated SmolLM2 Test (Exhaustive Type/Mode Matrix)")
 	modeInput := readInput(reader, "Choice [2]: ", "2")
 
 	switch modeInput {
@@ -52,13 +53,15 @@ func main() {
 		runHuggingFaceMode(reader)
 	case "3":
 		runTestingMode(reader)
+	case "4":
+		runAutomatedSmolLMTest(reader)
 	default:
 		runExperimentalMode(reader)
 	}
 }
 
 func runTestingMode(reader *bufio.Reader) {
-	layers := []string{"CNN1", "CNN2", "CNN3"}
+	layers := []string{"CNN1", "CNN2", "CNN3", "MHA"}
 	fmt.Println("\n🧪 Layer Testing")
 	fmt.Println("  [0] All Layers")
 	for i, name := range layers {
@@ -111,6 +114,13 @@ func runLayerTests(reader *bufio.Reader, layerName string) {
 			{"Training (6 modes × 21 types)", layer.RunCNN3Training},
 			{"GPU Forward Parity", layer.RunCNN3GPUForward},
 			{"GPU Backward Parity", layer.RunCNN3GPUBackward},
+		}
+	case "MHA":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunMHAL1Caching},
+			{"Training (6 modes × 21 types)", layer.RunMHATraining},
+			{"GPU Forward Parity", layer.RunMHAGPUForward},
+			{"GPU Backward Parity", layer.RunMHAGPUBackward},
 		}
 	default:
 		fmt.Printf("No tests registered for layer: %s\n", layerName)
@@ -224,6 +234,18 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSpace(input)
 	useGPU = input == "1"
+
+	fmt.Println("\n🚀 Select Execution Mode:")
+	fmt.Println("  [1] Standard Forward")
+	fmt.Println("  [2] Single-Core Tiled Forward")
+	fmt.Println("  [3] Multi-Core Tiled Forward")
+	execModeInput := readInput(reader, "Choice [1]: ", "1")
+
+	useTiling = execModeInput != "1"
+	tilingMode := execModeInput // "2" or "3"
+	if !useTiling {
+		tileSize = 0
+	}
 
 	if useGPU {
 		fmt.Print("💎 Weight Precision? (4=Q4_0 / 32=FP32) [4]: ")
@@ -344,6 +366,7 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	if useTiling {
 		tr.EnableTiling(tileSize)
 	}
+	tr.Network.EnableMultiCoreTiling = (tilingMode == "3")
 	if useGPU {
 		fmt.Print("⏳ GPU Synchronization... ")
 		if err := tr.Network.InitWGPU(); err != nil {
@@ -434,6 +457,200 @@ func processGlitchyReply(input string) {
 	if time.Now().UnixNano()%5 == 0 {
 		fmt.Print(" [DRIFT]")
 	}
+}
+func runAutomatedSmolLMTest(reader *bufio.Reader) {
+	fmt.Println("\n🤖 Starting Automated SmolLM2-135M-Instruct Exhaustive Test...")
+
+	// 1. Identify Snapshot Directory
+	home, _ := os.UserHomeDir()
+	snapshotDir := filepath.Join(home, ".cache", "huggingface", "hub", "models--HuggingFaceTB--SmolLM2-135M-Instruct", "snapshots")
+	entries, _ := os.ReadDir(snapshotDir)
+	if len(entries) == 0 {
+		fmt.Printf("❌ ERROR: No snapshots found in %s\n", snapshotDir)
+		return
+	}
+	snapshotDir = filepath.Join(snapshotDir, entries[0].Name())
+
+	// 2. Load Config & Tokenizer
+	configData, _ := os.ReadFile(filepath.Join(snapshotDir, "config.json"))
+	var config map[string]interface{}
+	json.Unmarshal(configData, &config)
+
+	tokenizerPath := filepath.Join(snapshotDir, "tokenizer.json")
+	tk, err := poly.LoadTokenizer(tokenizerPath)
+	if err != nil {
+		fmt.Printf("❌ Tokenizer failure: %v\n", err)
+		return
+	}
+
+	numLayers := int(config["num_hidden_layers"].(float64))
+	numHeads := int(config["num_attention_heads"].(float64))
+	numKVHeads := int(config["num_key_value_heads"].(float64))
+	headDim := int(config["hidden_size"].(float64)) / numHeads
+	intermediateSize := int(config["intermediate_size"].(float64))
+	hiddenSize := int(config["hidden_size"].(float64))
+	ropeFreqBase := float32(config["rope_theta"].(float64))
+
+	// 3. Load Tensors
+	safetensorFiles, _ := filepath.Glob(filepath.Join(snapshotDir, "*.safetensors"))
+	allTensors := make(map[string][]float32)
+	for _, f := range safetensorFiles {
+		t, _ := poly.LoadSafetensors(f)
+		for k, v := range t {
+			allTensors[k] = v
+		}
+	}
+
+	mapper := poly.NewPrefixWeightMapper()
+	embeddings, lmHead, finalNorm, _ := mapper.MapWeights(allTensors)
+
+	// 4. Test Matrix setup
+	devices := []string{"cpu", "gpu"} // CPU first for default behavior
+	testDTypes := []poly.DType{poly.DTypeFloat32, poly.DTypeInt4}
+	
+	tilingModes := []struct {
+		name  string
+		tiled bool
+		mc    bool
+	}{
+		{"Standard", false, false},
+		{"Single-Core", true, false},
+		{"Multi-Core", true, true},
+	}
+
+	fmt.Println("\n--- SmolLM2 Automated Performance Matrix ---")
+	fmt.Printf("| %-10s | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", 
+		"DType", "Tiling", "Dev", "Prefill", "DecodeSum", "tok/s", "Logit[0]", "Tokens")
+	fmt.Println("|" + strings.Repeat("-", 12) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 8) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 10) + "|" + strings.Repeat("-", 12) + "|" + strings.Repeat("-", 14) + "|")
+
+	for _, dev := range devices {
+		useGPU := (dev == "gpu")
+		for _, dt := range testDTypes {
+			for _, tm := range tilingModes {
+				// Initialize Network fresh
+				net := poly.NewVolumetricNetwork(1, 1, 1, numLayers*4)
+				net.EnableMultiCoreTiling = tm.mc
+				net.UseGPU = useGPU
+				
+				if useGPU {
+					if err := net.InitWGPU(); err != nil {
+						fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "INIT ERR", "-", "-", "-", "-")
+						continue
+					}
+				}
+
+				// Populate layers and load weights
+				kvDim := numKVHeads * headDim
+				mhaSize := (hiddenSize * hiddenSize) + (2 * hiddenSize * kvDim) + (hiddenSize * hiddenSize) + (2 * hiddenSize) + (2 * kvDim)
+				mlpSize := (3 * hiddenSize * intermediateSize) + (2 * intermediateSize) + hiddenSize
+
+				for i := 0; i < numLayers; i++ {
+					base := i * 4
+					l0 := &net.Layers[base];   l0.Network = net; l0.Type = poly.LayerRMSNorm;            l0.InputHeight = hiddenSize; l0.OutputHeight = hiddenSize; l0.WeightStore = poly.NewWeightStore(hiddenSize)
+					l1 := &net.Layers[base+1]; l1.Network = net; l1.Type = poly.LayerMultiHeadAttention; l1.DModel = hiddenSize;      l1.NumHeads = numHeads;       l1.NumKVHeads = numKVHeads; l1.HeadDim = headDim; l1.RoPEFreqBase = float64(ropeFreqBase); l1.MaxSeqLen = 2048; l1.WeightStore = poly.NewWeightStore(mhaSize)
+					l2 := &net.Layers[base+2]; l2.Network = net; l2.Type = poly.LayerRMSNorm;            l2.InputHeight = hiddenSize; l2.OutputHeight = hiddenSize; l2.WeightStore = poly.NewWeightStore(hiddenSize)
+					l3 := &net.Layers[base+3]; l3.Network = net; l3.Type = poly.LayerSwiGLU;             l3.InputHeight = hiddenSize; l3.OutputHeight = intermediateSize; l3.WeightStore = poly.NewWeightStore(mlpSize)
+					
+					// Set DType and Tiling
+					for j := 0; j < 4; j++ {
+						nl := &net.Layers[base+j]
+						nl.DType = dt
+						nl.UseTiling = tm.tiled
+					}
+				}
+				
+				poly.LoadWithPrefixes(net, allTensors)
+
+				tr := poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
+				if useGPU {
+					tr.SyncToGPU()
+				} else {
+					net.SyncToCPU()
+				}
+
+				// Prompt setup
+				systemPrompt := "You are a digital being."
+				userMsg := "how are you?"
+				fullPrompt := poly.ChatML.BuildPrompt(nil, systemPrompt, userMsg)
+				tokensIn := tk.Encode(fullPrompt, true)
+				
+				if len(tokensIn) == 0 {
+					fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "TOK ERR", "-", "-", "-", "-")
+					if useGPU && net != nil { net.DestroyWGPU() }
+					continue
+				}
+
+				var generatedTokens []uint32
+				var logit0 float32
+				var fwdErr error
+				maxGen := 5
+				currentTokens := tokensIn
+				var prefillTime, decodeTime time.Duration
+				
+				for g := 0; g < maxGen; g++ {
+					stepStart := time.Now()
+					var lastLogits []float32
+					if useGPU {
+						logitTensor, err := tr.ForwardTokenIDsWGPU(currentTokens, nil, true, true)
+						if err == nil {
+							// For compatibility with Numeric interface, assuming float32
+							lastLogits = logitTensor.Data
+						} else {
+							fwdErr = err
+							break
+						}
+						logit0 = lastLogits[0]
+					} else {
+						if g == 0 { tr.Reset() }
+						allEmbeds := tr.TokensToTensor(currentTokens)
+						hidden := tr.ForwardFull(allEmbeds)
+						lastHalf := hidden.Data[len(hidden.Data)-tr.HiddenSize:]
+						lastLogits = tr.ApplyLMHead(lastHalf)
+						logit0 = lastLogits[0]
+					}
+					
+					dur := time.Since(stepStart)
+					if g == 0 {
+						prefillTime = dur
+					} else {
+						decodeTime += dur
+					}
+
+					var maxWeight float32 = -1e9
+					var maxIdx int = 0
+					for i, w := range lastLogits {
+						if w > maxWeight { maxWeight = w; maxIdx = i }
+					}
+					generatedTokens = append(generatedTokens, uint32(maxIdx))
+					currentTokens = []uint32{uint32(maxIdx)}
+				}
+
+				if fwdErr != nil {
+					fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "FWD ERR", "-", "-", "-", "-")
+					fmt.Printf("   ↳ GPU Error Detail: %v\n", fwdErr)
+					if useGPU && net != nil { net.DestroyWGPU() }
+					continue
+				}
+
+				toks := 0.0
+				if maxGen > 1 && decodeTime.Seconds() > 0 {
+					toks = float64(maxGen-1) / decodeTime.Seconds()
+				}
+
+				predicted := tk.Decode(generatedTokens, true)
+				if strings.TrimSpace(predicted) == "" { predicted = fmt.Sprintf("ID:%v", generatedTokens) }
+				if len(predicted) > 12 { predicted = predicted[:9] + "..." }
+
+				fmt.Printf("| %-10v | %-12s | %-6s | %-12v | %-12v | %-8.2f | %-10.4f | %-12s |\n", 
+					dt, tm.name, dev, prefillTime, decodeTime, toks, logit0, predicted)
+				
+				if useGPU && net != nil { net.DestroyWGPU() }
+				net = nil
+				tr = nil
+			}
+		}
+	}
+	fmt.Println("\n✅ Automated tests complete.")
 }
 
 func readInput(reader *bufio.Reader, prompt string, Default string) string {
