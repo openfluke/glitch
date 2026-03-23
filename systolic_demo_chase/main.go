@@ -146,38 +146,42 @@ func createDeepNetwork(tiling bool) *poly.VolumetricNetwork {
 		case 1:
 			layer.InputHeight = 8
 			layer.OutputHeight = 32
-			layer.Activation = poly.ActivationTanh
+			layer.Activation = poly.ActivationLeakyReLU
 			layer.WeightStore = poly.NewWeightStore((8 * 32) + 32)
+			layer.WeightStore.HeRandomize(time.Now().UnixNano(), 8)
 		case 2:
 			layer.InputHeight = 32
 			layer.OutputHeight = 64
-			layer.Activation = poly.ActivationTanh
+			layer.Activation = poly.ActivationLeakyReLU
 			layer.WeightStore = poly.NewWeightStore((32 * 64) + 64)
+			layer.WeightStore.HeRandomize(time.Now().UnixNano(), 32)
 		case 3:
 			layer.InputHeight = 64
 			layer.OutputHeight = 64
-			layer.Activation = poly.ActivationTanh
+			layer.Activation = poly.ActivationLeakyReLU
 			layer.WeightStore = poly.NewWeightStore((64 * 64) + 64)
+			layer.WeightStore.HeRandomize(time.Now().UnixNano(), 64)
 		case 4:
 			layer.InputHeight = 64
 			layer.OutputHeight = 64
-			layer.Activation = poly.ActivationTanh
+			layer.Activation = poly.ActivationLeakyReLU
 			layer.WeightStore = poly.NewWeightStore((64 * 64) + 64)
+			layer.WeightStore.HeRandomize(time.Now().UnixNano(), 64)
 		case 5:
 			layer.InputHeight = 64
 			layer.OutputHeight = 32
-			layer.Activation = poly.ActivationTanh
+			layer.Activation = poly.ActivationLeakyReLU
 			layer.WeightStore = poly.NewWeightStore((64 * 32) + 32)
+			layer.WeightStore.HeRandomize(time.Now().UnixNano(), 64)
 		case 6:
 			layer.InputHeight = 32
 			layer.OutputHeight = 4
 			layer.Activation = poly.ActivationSigmoid
 			layer.WeightStore = poly.NewWeightStore((32 * 4) + 4)
+			layer.WeightStore.HeRandomize(time.Now().UnixNano(), 32)
 		}
 		
-		if !layer.IsDisabled {
-			layer.WeightStore.Randomize(time.Now().UnixNano(), 0.1)
-		}
+		// Removed redundant Randomize call below
 	}
 
 	return net
