@@ -251,13 +251,14 @@ func RunCNN2Training() {
 	fmt.Println()
 
 	testNet := poly.NewVolumetricNetwork(1, 1, 1, 1)
-	gpuAvail := testNet.InitWGPU() == nil
-	if gpuAvail {
+	if err := testNet.InitWGPU(); err != nil {
+		fmt.Println("No GPU detected — GPU modes skipped.")
+	} else {
+		defer testNet.DestroyWGPU()
 		sc, mc := poly.CNN2GPUTileSizes(testNet.GPUContext)
 		fmt.Printf("GPU ready — SC tile=%d  MC tile=%d\n\n", sc, mc)
-	} else {
-		fmt.Println("No GPU detected — GPU modes skipped.")
 	}
+	gpuAvail := testNet.GPUContext != nil
 
 	allModes := []poly.TrainingMode{
 		poly.TrainingModeCPUNormal,
@@ -287,6 +288,9 @@ func RunCNN2Training() {
 				fmt.Printf("| %-10s | %-13s | ERR        | ERR        | —        | ERR     | %s\n", cfg.name, mode.String(), err.Error())
 				overallPass = false
 				continue
+			}
+			if gpuAvail && mode.IsGPU() {
+				net.GPUContext = testNet.GPUContext
 			}
 
 			w0 := cloneMaster(net.Layers[0].WeightStore)
@@ -374,6 +378,7 @@ func RunCNN2GPUForward() {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
+	defer net.DestroyWGPU()
 	ctx := net.GPUContext
 	scTile, mcTile := poly.CNN2GPUTileSizes(ctx)
 	fmt.Printf("GPU ready — SC tile=%d  MC tile=%d  MaxInvocations=%d\n\n",
@@ -555,6 +560,7 @@ func RunCNN2GPUBackward() {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
+	defer net.DestroyWGPU()
 	ctx := net.GPUContext
 	scTile, mcTile := poly.CNN2GPUTileSizes(ctx)
 	fmt.Printf("GPU ready — SC tile=%d  MC tile=%d\n\n", scTile, mcTile)

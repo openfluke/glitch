@@ -291,13 +291,14 @@ func RunMHATraining() {
 	fmt.Println()
 
 	testNet := poly.NewVolumetricNetwork(1, 1, 1, 1)
-	gpuAvail := testNet.InitWGPU() == nil
-	if gpuAvail {
+	if err := testNet.InitWGPU(); err != nil {
+		fmt.Println("No GPU detected — GPU modes skipped.")
+	} else {
+		defer testNet.DestroyWGPU()
 		sc, mc := poly.MHAGPUTileSizes(testNet.GPUContext, headDim)
 		fmt.Printf("GPU ready — SC tile=%d  MC tile=%d\n\n", sc, mc)
-	} else {
-		fmt.Println("No GPU detected — GPU modes skipped.")
 	}
+	gpuAvail := testNet.GPUContext != nil
 
 	allModes := []poly.TrainingMode{
 		poly.TrainingModeCPUNormal,
@@ -422,6 +423,7 @@ func RunMHAGPUForward() {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
+	defer net.DestroyWGPU()
 	ctx := net.GPUContext
 
 	const (
@@ -577,6 +579,7 @@ func RunMHAGPUBackward() {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
+	defer net.DestroyWGPU()
 	ctx := net.GPUContext
 
 	const (

@@ -71,6 +71,10 @@ func runTestingMode(reader *bufio.Reader) {
 
 	var selectedLayers []string
 	if layerInput == "0" {
+		confirm := readInput(reader, "would you like to run all tests on all layers? (1=yes / 0=no) [0]: ", "0")
+		if confirm != "1" {
+			return
+		}
 		selectedLayers = layers
 	} else {
 		idx, err := strconv.Atoi(layerInput)
@@ -82,11 +86,15 @@ func runTestingMode(reader *bufio.Reader) {
 	}
 
 	for _, layerName := range selectedLayers {
-		runLayerTests(reader, layerName)
+		if layerInput == "0" {
+			runLayerTests(reader, layerName, "0")
+		} else {
+			runLayerTests(reader, layerName, "")
+		}
 	}
 }
 
-func runLayerTests(reader *bufio.Reader, layerName string) {
+func runLayerTests(reader *bufio.Reader, layerName string, testInput string) {
 	type testEntry struct {
 		name string
 		fn   func()
@@ -127,12 +135,14 @@ func runLayerTests(reader *bufio.Reader, layerName string) {
 		return
 	}
 
-	fmt.Printf("\n  Tests for %s:\n", layerName)
-	fmt.Println("  [0] All")
-	for i, t := range tests {
-		fmt.Printf("  [%d] %s\n", i+1, t.name)
+	if testInput == "" {
+		fmt.Printf("\n  Tests for %s:\n", layerName)
+		fmt.Println("  [0] All")
+		for i, t := range tests {
+			fmt.Printf("  [%d] %s\n", i+1, t.name)
+		}
+		testInput = readInput(reader, "Select test [0]: ", "0")
 	}
-	testInput := readInput(reader, "Select test [0]: ", "0")
 
 	if testInput == "0" {
 		for _, t := range tests {
@@ -217,7 +227,7 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
 	deterministic = detInput == "1"
 
-	autoTile := poly.CalculateOptimalTileSize(64)
+	autoTile := poly.CalculateOptimalTileSize(64, poly.DTypeFloat32)
 	tilingPrompt := fmt.Sprintf("🚀 FlashPoly Tile size? (auto-detected: %d | 0=disable) [%d]: ", autoTile, autoTile)
 	tilingInput := readInput(reader, tilingPrompt, strconv.Itoa(autoTile))
 
@@ -505,8 +515,14 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 	embeddings, lmHead, finalNorm, _ := mapper.MapWeights(allTensors)
 
 	// 4. Test Matrix setup
-	devices := []string{"cpu", "gpu"} // CPU first for default behavior
-	testDTypes := []poly.DType{poly.DTypeFloat32, poly.DTypeInt4}
+	devices := []string{"cpu", "gpu"}
+	testDTypes := []poly.DType{
+		poly.DTypeFloat32, 
+		poly.DTypeFloat16, 
+		poly.DTypeBFloat16,
+		poly.DTypeInt8,
+		poly.DTypeInt4,
+	}
 	
 	tilingModes := []struct {
 		name  string
@@ -519,11 +535,14 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 	}
 
 	fmt.Println("\n--- SmolLM2 Automated Performance Matrix ---")
-	fmt.Printf("| %-10s | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", 
+	skipCPU := readInput(reader, "⏭️  Skip CPU tests? (1=yes / 0=no) [0]: ", "0") == "1"
+
+	fmt.Printf("| %-10s | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n",
 		"DType", "Tiling", "Dev", "Prefill", "DecodeSum", "tok/s", "Logit[0]", "Tokens")
 	fmt.Println("|" + strings.Repeat("-", 12) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 8) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 10) + "|" + strings.Repeat("-", 12) + "|" + strings.Repeat("-", 14) + "|")
 
 	for _, dev := range devices {
+		if dev == "cpu" && skipCPU { continue }
 		useGPU := (dev == "gpu")
 		for _, dt := range testDTypes {
 			for _, tm := range tilingModes {
@@ -531,7 +550,7 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 				net := poly.NewVolumetricNetwork(1, 1, 1, numLayers*4)
 				net.EnableMultiCoreTiling = tm.mc
 				net.UseGPU = useGPU
-				
+
 				if useGPU {
 					if err := net.InitWGPU(); err != nil {
 						fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "INIT ERR", "-", "-", "-", "-")
@@ -546,23 +565,28 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 
 				for i := 0; i < numLayers; i++ {
 					base := i * 4
-					l0 := &net.Layers[base];   l0.Network = net; l0.Type = poly.LayerRMSNorm;            l0.InputHeight = hiddenSize; l0.OutputHeight = hiddenSize; l0.WeightStore = poly.NewWeightStore(hiddenSize)
-					l1 := &net.Layers[base+1]; l1.Network = net; l1.Type = poly.LayerMultiHeadAttention; l1.DModel = hiddenSize;      l1.NumHeads = numHeads;       l1.NumKVHeads = numKVHeads; l1.HeadDim = headDim; l1.RoPEFreqBase = float64(ropeFreqBase); l1.MaxSeqLen = 2048; l1.WeightStore = poly.NewWeightStore(mhaSize)
-					l2 := &net.Layers[base+2]; l2.Network = net; l2.Type = poly.LayerRMSNorm;            l2.InputHeight = hiddenSize; l2.OutputHeight = hiddenSize; l2.WeightStore = poly.NewWeightStore(hiddenSize)
-					l3 := &net.Layers[base+3]; l3.Network = net; l3.Type = poly.LayerSwiGLU;             l3.InputHeight = hiddenSize; l3.OutputHeight = intermediateSize; l3.WeightStore = poly.NewWeightStore(mlpSize)
-					
+					l0 := &net.Layers[base]; l0.Network = net; l0.Type = poly.LayerRMSNorm; l0.InputHeight = hiddenSize; l0.OutputHeight = hiddenSize; l0.WeightStore = poly.NewWeightStore(hiddenSize)
+					l1 := &net.Layers[base+1]; l1.Network = net; l1.Type = poly.LayerMultiHeadAttention; l1.DModel = hiddenSize; l1.NumHeads = numHeads; l1.NumKVHeads = numKVHeads; l1.HeadDim = headDim; l1.RoPEFreqBase = float64(ropeFreqBase); l1.MaxSeqLen = 2048; l1.WeightStore = poly.NewWeightStore(mhaSize)
+					l2 := &net.Layers[base+2]; l2.Network = net; l2.Type = poly.LayerRMSNorm; l2.InputHeight = hiddenSize; l2.OutputHeight = hiddenSize; l2.WeightStore = poly.NewWeightStore(hiddenSize)
+					l3 := &net.Layers[base+3]; l3.Network = net; l3.Type = poly.LayerSwiGLU; l3.InputHeight = hiddenSize; l3.OutputHeight = intermediateSize; l3.WeightStore = poly.NewWeightStore(mlpSize)
+
 					// Set DType and Tiling
 					for j := 0; j < 4; j++ {
 						nl := &net.Layers[base+j]
 						nl.DType = dt
 						nl.UseTiling = tm.tiled
+						if tm.tiled {
+							// SyncToCPU will auto-populate nl.CPUTileSizes and nl.TileSize
+							// based on optimal heuristics for the hardware and DType.
+						}
 					}
 				}
-				
+
 				poly.LoadWithPrefixes(net, allTensors)
 
 				tr := poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
 				if useGPU {
+					for i := range net.Layers { net.Layers[i].SyncToGPU() }
 					tr.SyncToGPU()
 				} else {
 					net.SyncToCPU()
@@ -573,7 +597,7 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 				userMsg := "how are you?"
 				fullPrompt := poly.ChatML.BuildPrompt(nil, systemPrompt, userMsg)
 				tokensIn := tk.Encode(fullPrompt, true)
-				
+
 				if len(tokensIn) == 0 {
 					fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "TOK ERR", "-", "-", "-", "-")
 					if useGPU && net != nil { net.DestroyWGPU() }
@@ -586,7 +610,7 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 				maxGen := 5
 				currentTokens := tokensIn
 				var prefillTime, decodeTime time.Duration
-				
+
 				for g := 0; g < maxGen; g++ {
 					stepStart := time.Now()
 					var lastLogits []float32
@@ -608,7 +632,7 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 						lastLogits = tr.ApplyLMHead(lastHalf)
 						logit0 = lastLogits[0]
 					}
-					
+
 					dur := time.Since(stepStart)
 					if g == 0 {
 						prefillTime = dur
@@ -632,18 +656,19 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 					continue
 				}
 
-				toks := 0.0
+				tokPerSec := 0.0
 				if maxGen > 1 && decodeTime.Seconds() > 0 {
-					toks = float64(maxGen-1) / decodeTime.Seconds()
+					tokPerSec = float64(maxGen-1) / decodeTime.Seconds()
 				}
 
-				predicted := tk.Decode(generatedTokens, true)
-				if strings.TrimSpace(predicted) == "" { predicted = fmt.Sprintf("ID:%v", generatedTokens) }
-				if len(predicted) > 12 { predicted = predicted[:9] + "..." }
+				tokStr := tk.Decode(generatedTokens, true)
+				if strings.TrimSpace(tokStr) == "" { tokStr = fmt.Sprintf("ID:%v", generatedTokens) }
+				dispToks := tokStr
+				if len(dispToks) > 12 { dispToks = dispToks[:9] + "..." }
 
-				fmt.Printf("| %-10v | %-12s | %-6s | %-12v | %-12v | %-8.2f | %-10.4f | %-12s |\n", 
-					dt, tm.name, dev, prefillTime, decodeTime, toks, logit0, predicted)
-				
+				fmt.Printf("| %-10v | %-12s | %-6s | %-12v | %-12v | %-8.2f | %-10.4f | %-12s |\n",
+					dt, tm.name, dev, prefillTime, decodeTime, tokPerSec, logit0, dispToks)
+
 				if useGPU && net != nil { net.DestroyWGPU() }
 				net = nil
 				tr = nil
