@@ -22,7 +22,7 @@ var (
 	chatTurns     []poly.Turn
 	weightDType   poly.DType = poly.DTypeFloat32
 	deterministic bool       = true
-	maxTokens                = 50
+	maxTokens                = 128
 	maxSeqLen                = 512
 )
 
@@ -614,10 +614,18 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 				for g := 0; g < maxGen; g++ {
 					stepStart := time.Now()
 					var lastLogits []float32
+					
+					var passTokens []uint32
+					if g == 0 {
+						passTokens = currentTokens
+						tr.Reset() // Ensure we start fresh
+					} else {
+						passTokens = []uint32{generatedTokens[len(generatedTokens)-1]}
+					}
+
 					if useGPU {
-						logitTensor, err := tr.ForwardTokenIDsWGPU(currentTokens, nil, true, true)
+						logitTensor, err := tr.ForwardTokenIDsWGPU(passTokens, nil, true, true)
 						if err == nil {
-							// For compatibility with Numeric interface, assuming float32
 							lastLogits = logitTensor.Data
 						} else {
 							fwdErr = err
@@ -625,29 +633,33 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 						}
 						logit0 = lastLogits[0]
 					} else {
-						if g == 0 { tr.Reset() }
-						allEmbeds := tr.TokensToTensor(currentTokens)
-						hidden := tr.ForwardFull(allEmbeds)
-						lastHalf := hidden.Data[len(hidden.Data)-tr.HiddenSize:]
-						lastLogits = tr.ApplyLMHead(lastHalf)
+						if g == 0 {
+							allEmbeds := tr.TokensToTensor(passTokens)
+							hidden := tr.ForwardFull(allEmbeds)
+							lastHalf := hidden.Data[len(hidden.Data)-tr.HiddenSize:]
+							lastLogits = tr.ApplyLMHead(lastHalf)
+						} else {
+							nextEmbed := tr.TokensToTensor(passTokens) // TokensToTensor handles 1 or more
+							hidden := tr.ForwardFull(nextEmbed) // ForwardFull handles any seqLen for CPU
+							// Note: For CPU, ForwardFull is actually the only exported way outside of internal Generate
+							// unless we use forwardOne. But ForwardFull works for seqLen=1.
+							lastHalf := hidden.Data[len(hidden.Data)-tr.HiddenSize:]
+							lastLogits = tr.ApplyLMHead(lastHalf)
+						}
 						logit0 = lastLogits[0]
 					}
 
+					nextToken := poly.SampleTopK(lastLogits, 1, 1.0, true)
+					generatedTokens = append(generatedTokens, uint32(nextToken))
+					
 					dur := time.Since(stepStart)
 					if g == 0 {
 						prefillTime = dur
 					} else {
 						decodeTime += dur
 					}
-
-					var maxWeight float32 = -1e9
-					var maxIdx int = 0
-					for i, w := range lastLogits {
-						if w > maxWeight { maxWeight = w; maxIdx = i }
-					}
-					generatedTokens = append(generatedTokens, uint32(maxIdx))
-					currentTokens = []uint32{uint32(maxIdx)}
 				}
+
 
 				if fwdErr != nil {
 					fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "FWD ERR", "-", "-", "-", "-")
@@ -669,7 +681,9 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 				fmt.Printf("| %-10v | %-12s | %-6s | %-12v | %-12v | %-8.2f | %-10.4f | %-12s |\n",
 					dt, tm.name, dev, prefillTime, decodeTime, tokPerSec, logit0, dispToks)
 
-				if useGPU && net != nil { net.DestroyWGPU() }
+				if useGPU && net != nil {
+					net.Release() // Crucial: Free GPU weight buffers to avoid VRAM exhaustion
+				}
 				net = nil
 				tr = nil
 			}
