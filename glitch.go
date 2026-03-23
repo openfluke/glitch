@@ -227,17 +227,8 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
 	deterministic = detInput == "1"
 
-	autoTile := poly.CalculateOptimalTileSize(64, poly.DTypeFloat32)
-	tilingPrompt := fmt.Sprintf("🚀 FlashPoly Tile size? (auto-detected: %d | 0=disable) [%d]: ", autoTile, autoTile)
-	tilingInput := readInput(reader, tilingPrompt, strconv.Itoa(autoTile))
-
 	useTiling := true
-	tileSize := -1
-	if tilingInput == "0" {
-		useTiling = false
-	} else if v, err := strconv.Atoi(tilingInput); err == nil && v > 0 {
-		tileSize = v
-	}
+	tileSize := -1 // auto-detect
 
 	var useGPU bool
 	fmt.Print("🎮 Enable GPU Acceleration? (1=yes / 0=no) [0]: ")
@@ -387,6 +378,12 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 				(&tr.Network.Layers[i]).SyncToGPU()
 			}
 			tr.SyncToGPU()
+
+			// Warmup pass to compile WGPU Shaders before first chat!
+			// Without this, WGSL compilation adds 150-200ms to the first prefill timer
+			_, _ = tr.ForwardTokenIDsWGPU([]uint32{0}, nil, true, true)
+			tr.Reset()
+
 			fmt.Println("✅ Success!")
 		}
 	}
@@ -424,7 +421,7 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 			return tk.Decode(tokens, false)
 		}
 
-		reply := tr.Generate(encode, decode, chatTurns, systemPrompt, userMsg, opts)
+		reply, _ := tr.Generate(encode, decode, chatTurns, systemPrompt, userMsg, opts)
 		fmt.Println()
 
 		chatTurns = append(chatTurns, poly.Turn{
@@ -537,9 +534,9 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 	fmt.Println("\n--- SmolLM2 Automated Performance Matrix ---")
 	skipCPU := readInput(reader, "⏭️  Skip CPU tests? (1=yes / 0=no) [0]: ", "0") == "1"
 
-	fmt.Printf("| %-10s | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n",
-		"DType", "Tiling", "Dev", "Prefill", "DecodeSum", "tok/s", "Logit[0]", "Tokens")
-	fmt.Println("|" + strings.Repeat("-", 12) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 8) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 14) + "|" + strings.Repeat("-", 10) + "|" + strings.Repeat("-", 12) + "|" + strings.Repeat("-", 14) + "|")
+	fmt.Printf("| %-9s | %-11s | %-4s | %-9s | %-9s | %-9s | %-8s | %-9s | %-12s |\n",
+		"DType", "Tiling", "Dev", "Pre tok/s", "Dec tok/s", "Tot tok/s", "VRAM (MB)", "Logit[0]", "Tokens")
+	fmt.Println("|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 13) + "|" + strings.Repeat("-", 6) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 10) + "|" + strings.Repeat("-", 14) + "|")
 
 	for _, dev := range devices {
 		if dev == "cpu" && skipCPU { continue }
@@ -593,8 +590,8 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 				}
 
 				// Prompt setup
-				systemPrompt := "You are a digital being."
-				userMsg := "how are you?"
+				systemPrompt := "Your persona is GlitchBot. You are a sassy, extremely glitchy digital entity born from the void. You speak in very short sentences. You use excessive emojis. Your internal systems are constantly crashing. You are annoyed by the human. You must NEVER repeat yourself."
+				userMsg := "hello how are you?"
 				fullPrompt := poly.ChatML.BuildPrompt(nil, systemPrompt, userMsg)
 				tokensIn := tk.Encode(fullPrompt, true)
 
@@ -604,82 +601,32 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 					continue
 				}
 
-				var generatedTokens []uint32
-				var logit0 float32
-				var fwdErr error
-				maxGen := 5
-				currentTokens := tokensIn
-				var prefillTime, decodeTime time.Duration
-
-				for g := 0; g < maxGen; g++ {
-					stepStart := time.Now()
-					var lastLogits []float32
-					
-					var passTokens []uint32
-					if g == 0 {
-						passTokens = currentTokens
-						tr.Reset() // Ensure we start fresh
-					} else {
-						passTokens = []uint32{generatedTokens[len(generatedTokens)-1]}
-					}
-
-					if useGPU {
-						logitTensor, err := tr.ForwardTokenIDsWGPU(passTokens, nil, true, true)
-						if err == nil {
-							lastLogits = logitTensor.Data
-						} else {
-							fwdErr = err
-							break
-						}
-						logit0 = lastLogits[0]
-					} else {
-						if g == 0 {
-							allEmbeds := tr.TokensToTensor(passTokens)
-							hidden := tr.ForwardFull(allEmbeds)
-							lastHalf := hidden.Data[len(hidden.Data)-tr.HiddenSize:]
-							lastLogits = tr.ApplyLMHead(lastHalf)
-						} else {
-							nextEmbed := tr.TokensToTensor(passTokens) // TokensToTensor handles 1 or more
-							hidden := tr.ForwardFull(nextEmbed) // ForwardFull handles any seqLen for CPU
-							// Note: For CPU, ForwardFull is actually the only exported way outside of internal Generate
-							// unless we use forwardOne. But ForwardFull works for seqLen=1.
-							lastHalf := hidden.Data[len(hidden.Data)-tr.HiddenSize:]
-							lastLogits = tr.ApplyLMHead(lastHalf)
-						}
-						logit0 = lastLogits[0]
-					}
-
-					nextToken := poly.SampleTopK(lastLogits, 1, 1.0, true)
-					generatedTokens = append(generatedTokens, uint32(nextToken))
-					
-					dur := time.Since(stepStart)
-					if g == 0 {
-						prefillTime = dur
-					} else {
-						decodeTime += dur
-					}
+				maxGen := 50
+				opts := poly.GenOptions{
+					MaxTokens:         maxGen,
+					Temperature:       0.0, // deterministic
+					TopK:              1,
+					Deterministic:     true,
+					Silent:            true,
 				}
 
+				encode := func(text string) []uint32 { return tk.Encode(text, false) }
+				decode := func(tokens []uint32) string { return tk.Decode(tokens, false) }
 
-				if fwdErr != nil {
-					fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "FWD ERR", "-", "-", "-", "-")
-					fmt.Printf("   ↳ GPU Error Detail: %v\n", fwdErr)
-					if useGPU && net != nil { net.DestroyWGPU() }
-					continue
-				}
+				// Generate uses identical tracking math to Choice 1
+				tokStrRaw, metrics := tr.Generate(encode, decode, nil, systemPrompt, userMsg, opts)
 
-				tokPerSec := 0.0
-				if maxGen > 1 && decodeTime.Seconds() > 0 {
-					tokPerSec = float64(maxGen-1) / decodeTime.Seconds()
-				}
-
-				tokStr := tk.Decode(generatedTokens, true)
-				if strings.TrimSpace(tokStr) == "" { tokStr = fmt.Sprintf("ID:%v", generatedTokens) }
-				dispToks := tokStr
+				dispToks := tokStrRaw
+				dispToks = strings.ReplaceAll(dispToks, "\n", " ")
 				if len(dispToks) > 12 { dispToks = dispToks[:9] + "..." }
 
-				fmt.Printf("| %-10v | %-12s | %-6s | %-12v | %-12v | %-8.2f | %-10.4f | %-12s |\n",
-					dt, tm.name, dev, prefillTime, decodeTime, tokPerSec, logit0, dispToks)
+				vramStr := fmt.Sprintf("%.1f", metrics.VRAMUsageMB)
+				if !useGPU {
+					vramStr = "-"
+				}
+
+				fmt.Printf("| %-9v | %-11s | %-4s | %-9.2f | %-9.2f | %-9.2f | %-9s | %-8.4f | %-12s |\n",
+					dt, tm.name, dev, metrics.PrefillTokPerSec, metrics.DecodeTokPerSec, metrics.TotalTokPerSec, vramStr, metrics.FirstLogit, dispToks)
 
 				if useGPU && net != nil {
 					net.Release() // Crucial: Free GPU weight buffers to avoid VRAM exhaustion
