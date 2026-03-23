@@ -295,7 +295,7 @@ func RunMHATraining() {
 		fmt.Println("No GPU detected — GPU modes skipped.")
 	} else {
 		defer testNet.DestroyWGPU()
-		sc, mc := poly.MHAGPUTileSizes(testNet.GPUContext, headDim)
+		sc, mc := poly.MHAGPUTileSizes(testNet.GPUContext, headDim, poly.DTypeFloat32)
 		fmt.Printf("GPU ready — SC tile=%d  MC tile=%d\n\n", sc, mc)
 	}
 	gpuAvail := testNet.GPUContext != nil
@@ -436,7 +436,7 @@ func RunMHAGPUForward() {
 		maxSeqLen  = 512
 		batchSize  = 1
 	)
-	scTile, mcTile := poly.MHAGPUTileSizes(ctx, headDim)
+	scTile, mcTile := poly.MHAGPUTileSizes(ctx, headDim, poly.DTypeFloat32)
 	fmt.Printf("GPU ready — SC tile=%d  MC tile=%d  MaxInvocations=%d\n\n",
 		scTile, mcTile, ctx.Limits.MaxComputeInvocationsPerWorkgroup)
 
