@@ -128,6 +128,51 @@ sir, by a charity
   sits,
 Advantage shall not for we assured birds or bad? and o'
 
+## Interactive Snap Chat (6-Gram)
+
+The `chat_snap.go` utility provides an interactive interface to the best-performing sparse n-gram models.
+
+```text
+╔══════════════════════════════════════════════════════════════════╗
+║               SNAP INTERACTIVE CHAT  ·  6-GRAM                 ║
+║  Powered by the Poly Engine  ·  Zero-Backprop Architecture   ║
+╚══════════════════════════════════════════════════════════════════╝
+
+[*] Loading and Snapping 6-gram model (ctxLen=5)...
+[*] Analyzing unique patterns...
+[*] Found 141021 unique 6-gram patterns.
+[*] Snap complete. System ready.
+
+Prompt > hello how are you?
+Answer >
+Servant gardening house,
+That's Montague; for Katharina shame homely.
+
+BUCKINGHAM:
+My life as my rats than she's most lose happy vice's birds would
+
+[Stats] Gen time: 9.652s | Performance: 15.54 chars/sec
+
+Prompt > my rats
+Answer >  are person, and king pity nor for a little accuse his master 
+it was not so mine own since him and knees
+Or ears?
+
+MARCIUS:
+No less, friar is will not
+
+[Stats] Gen time: 9.608s | Performance: 15.61 chars/sec
+```
+
+## Architecture Summary
+
+| Model             | Context | Patterns | Perplexity | Notes |
+|-------------------|---------|----------|------------|-------|
+| 3-gram            | 2 chars | 1,360    | 7.22       | Stable baseline |
+| 4-gram            | 3 chars | 10,899   | 6.15       | **Global Optimum** |
+| 5-gram            | 4 chars | 46,224   | 12.04      | Sparsity onset |
+| 6-gram            | 5 chars | 141,021  | 36.30      | Maximum coherence |
+
 ╔══════════════════════════════════════════════════════════════════╗
 ║               DEEP N-GRAM CONTEXT COMPARISON                     ║
 ╠══════════════════════════════════════════════════╦══════════════╣
