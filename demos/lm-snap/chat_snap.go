@@ -37,31 +37,41 @@ func main() {
 
 	net := buildNet(V, ctxLen, numClusters)
 	installSnap(net, V, ctxLen, prefixes, counts)
-	
+
 	fmt.Println("[*] Snap complete. System ready.")
 	fmt.Println("[*] Type at least 5 chars (e.g. from Shakespeare) and press Enter.")
-	
+
 	rand.Seed(time.Now().UnixNano())
 	hintIdx := rand.Intn(len(corpus) - ctxLen - 1)
 	hint := ""
-	for i := 0; i < ctxLen; i++ { hint += string(vocab[corpus[hintIdx+i]]) }
+	for i := 0; i < ctxLen; i++ {
+		hint += string(vocab[corpus[hintIdx+i]])
+	}
 	fmt.Printf("[*] Suggestion: '%s'\n", hint)
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("Prompt > ")
-		if !scanner.Scan() { break }
+		if !scanner.Scan() {
+			break
+		}
 		input := scanner.Text()
-		if strings.ToLower(input) == "exit" { break }
+		if strings.ToLower(input) == "exit" {
+			break
+		}
 
-		if len(input) < ctxLen { input = strings.Repeat(" ", ctxLen-len(input)) + input }
+		if len(input) < ctxLen {
+			input = strings.Repeat(" ", ctxLen-len(input)) + input
+		}
 		prompt := input[len(input)-ctxLen:]
 		seed := make([]int, ctxLen)
 		for i := 0; i < ctxLen; i++ {
 			c := prompt[i]
 			idx, ok := charToIdx[c]
-			if !ok { idx = 0 }
+			if !ok {
+				idx = 0
+			}
 			seed[i] = idx
 		}
 
@@ -76,15 +86,19 @@ func generate(net *poly.VolumetricNetwork, seed []int, vocab []byte, V, ctxLen, 
 	copy(context, seed)
 	input := poly.NewTensor[float32](1, ctxLen*V)
 	startTime := time.Now()
-	
+
 	for i := 0; i < length; i++ {
-		for k := range input.Data { input.Data[k] = 0 }
-		for j := 0; j < ctxLen; j++ { input.Data[j*V+context[j]] = 1.0 }
+		for k := range input.Data {
+			input.Data[k] = 0
+		}
+		for j := 0; j < ctxLen; j++ {
+			input.Data[j*V+context[j]] = 1.0
+		}
 
 		output, _, _ := poly.ForwardPolymorphic(net, input)
 		probs := softmax(output.Data, 1.0) // 1.0 as in test_compare_deep.go
 		next := sample(probs)
-		
+
 		fmt.Printf("%c", vocab[next])
 		copy(context, context[1:])
 		context[ctxLen-1] = next
@@ -108,8 +122,10 @@ func buildNet(V, ctxLen, numClusters int) *poly.VolumetricNetwork {
 		}]
 	}`, inputDim, V, inputDim, numClusters, numClusters, numClusters, V)
 	net, err := poly.BuildNetworkFromJSON([]byte(json))
-	if err != nil { panic(err) }
-	
+	if err != nil {
+		panic(err)
+	}
+
 	// Exact same wrap as in test_compare_deep.go
 	poly.WrapWithMetacognition(net, []poly.MetaRule{})
 	return net
@@ -125,9 +141,13 @@ func installSnap(net *poly.VolumetricNetwork, V, ctxLen int, prefixes []string, 
 
 	for c, prefix := range prefixes {
 		chars := parsePrefix(prefix)
-		for i, charIdx := range chars { km.WeightStore.Master[c*inputDim+i*V+charIdx] = 1.0 }
+		for i, charIdx := range chars {
+			km.WeightStore.Master[c*inputDim+i*V+charIdx] = 1.0
+		}
 		total, cnts := 0, counts[prefix]
-		for _, v := range cnts { total += v }
+		for _, v := range cnts {
+			total += v
+		}
 		for next, count := range cnts {
 			p := float64(count) / float64(total)
 			ds.WeightStore.Master[next*numClusters+c] = float32(math.Log(p + 1e-10))
@@ -140,7 +160,9 @@ func analyzeNgrams(corpus []int, V, n int) (map[string][]int, []string) {
 	var prefixes []string
 	for i := n; i < len(corpus); i++ {
 		prefix := ""
-		for j := 0; j < n; j++ { prefix += fmt.Sprintf("%03d|", corpus[i-n+j]) }
+		for j := 0; j < n; j++ {
+			prefix += fmt.Sprintf("%03d|", corpus[i-n+j])
+		}
 		if _, ok := counts[prefix]; !ok {
 			counts[prefix] = make([]int, V)
 			prefixes = append(prefixes, prefix)
@@ -164,28 +186,50 @@ func parsePrefix(prefix string) []int {
 func loadCorpus() (corpus []int, vocab []byte, charToIdx map[byte]int) {
 	data, _ := os.ReadFile(CorpusFile)
 	seen := make(map[byte]bool)
-	for _, b := range data { seen[b] = true }
-	for b := range seen { vocab = append(vocab, b) }
+	for _, b := range data {
+		seen[b] = true
+	}
+	for b := range seen {
+		vocab = append(vocab, b)
+	}
 	sort.Slice(vocab, func(i, j int) bool { return vocab[i] < vocab[j] })
 	charToIdx = make(map[byte]int)
-	for i, c := range vocab { charToIdx[c] = i }
-	for _, b := range data { corpus = append(corpus, charToIdx[b]) }
+	for i, c := range vocab {
+		charToIdx[c] = i
+	}
+	for _, b := range data {
+		corpus = append(corpus, charToIdx[b])
+	}
 	return
 }
 
 func softmax(v []float32, temp float64) []float32 {
 	out := make([]float32, len(v))
 	maxV := v[0]
-	for _, x := range v { if x > maxV { maxV = x } }
+	for _, x := range v {
+		if x > maxV {
+			maxV = x
+		}
+	}
 	sum := float32(0)
-	for i, x := range v { out[i] = float32(math.Exp(float64(x-maxV)/temp)); sum += out[i] }
-	for i := range out { out[i] /= sum }
+	for i, x := range v {
+		out[i] = float32(math.Exp(float64(x-maxV) / temp))
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
 	return out
 }
 
 func sample(probs []float32) int {
 	u := rand.Float32()
 	cum := float32(0)
-	for i, p := range probs { cum += p; if u < cum { return i } }
+	for i, p := range probs {
+		cum += p
+		if u < cum {
+			return i
+		}
+	}
 	return len(probs) - 1
 }
