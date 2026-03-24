@@ -313,6 +313,132 @@ func main() {
 	fmt.Println("║  Backprop: NONE   Optimizer: NONE   Training time: ~0ms                  ║")
 	fmt.Println("║  CNN layers: DISABLED (random weights never used)                         ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════════╝")
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// DTYPE PRECISION SWEEP
+	// Take the Gen 5 sub-prototypes (best float32 result) and re-evaluate them
+	// at every numerical precision the poly framework supports — from float64
+	// down to 1-bit binary.  Each type's centers are quantized via
+	// SimulatePrecision (with proper per-type scale) then reinstalled as float32
+	// KMeans so the distance computation is always in float32.
+	// This answers: how much accuracy do you lose as you compress the centroids?
+	// ══════════════════════════════════════════════════════════════════════════
+	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("  DTYPE PRECISION SWEEP  —  Gen 5 sub-prototypes at every numeric type")
+	fmt.Println("  BEFORE (float32): the results above.  AFTER: each dtype below.")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	type dtypeEntry struct {
+		dtype poly.DType
+		name  string
+		bits  int
+	}
+	allDTypes := []dtypeEntry{
+		{poly.DTypeFloat64,  "float64",  64},
+		{poly.DTypeFloat32,  "float32",  32}, // baseline — should match Gen 5 exactly
+		{poly.DTypeFloat16,  "float16",  16},
+		{poly.DTypeBFloat16, "bfloat16", 16},
+		{poly.DTypeFP8E4M3,  "fp8_e4m3",  8},
+		{poly.DTypeFP8E5M2,  "fp8_e5m2",  8},
+		{poly.DTypeInt32,    "int32",    32},
+		{poly.DTypeInt16,    "int16",    16},
+		{poly.DTypeInt8,     "int8",      8},
+		{poly.DTypeInt4,     "int4",      4},
+		{poly.DTypeInt2,     "int2",      2},
+		{poly.DTypeTernary,  "ternary",   2},
+		{poly.DTypeBinary,   "binary",    1},
+	}
+
+	// Find max absolute value across all sub-prototype centers for scaling
+	maxAbs := float32(0)
+	for _, c := range subProtos {
+		for _, v := range c {
+			if a := float32(math.Abs(float64(v))); a > maxAbs { maxAbs = a }
+		}
+	}
+	fmt.Printf("\n  Sub-prototype weight range: [%.4f, %.4f]  (maxAbs=%.4f)\n\n",
+		-maxAbs, maxAbs, maxAbs)
+
+	// Scale map: maps each dtype to a quantization step that uses the full bit range.
+	// For float types, scale=1.0 (SimulatePrecision handles mantissa truncation directly).
+	// For integer types, scale = maxAbs / maxPositiveIntVal so values fill [-max, +max].
+	dtypeScale := func(dt poly.DType) float32 {
+		switch dt {
+		case poly.DTypeInt64, poly.DTypeUint64:
+			return maxAbs / 9.2e18
+		case poly.DTypeInt32, poly.DTypeUint32:
+			return maxAbs / 2.147e9
+		case poly.DTypeInt16, poly.DTypeUint16:
+			return maxAbs / 32767.0
+		case poly.DTypeInt8, poly.DTypeUint8:
+			return maxAbs / 127.0
+		case poly.DTypeFP8E4M3, poly.DTypeFP8E5M2:
+			return maxAbs / 127.0
+		case poly.DTypeInt4, poly.DTypeUint4, poly.DTypeFP4:
+			return maxAbs / 7.0
+		case poly.DTypeInt2, poly.DTypeUint2, poly.DTypeTernary:
+			return maxAbs / 1.0
+		case poly.DTypeBinary:
+			return maxAbs
+		default: // float64, float32, float16, bfloat16
+			return 1.0
+		}
+	}
+
+	type DTypeResult struct {
+		name   string
+		bits   int
+		valAcc float64
+		testAcc float64
+	}
+	var dtypeResults []DTypeResult
+
+	for _, entry := range allDTypes {
+		scale := dtypeScale(entry.dtype)
+
+		// Quantize sub-prototype centers using SimulatePrecision, store back as float32.
+		// Distance computation in KMeans stays in float32 — this tests centroid precision only.
+		qProtos := make([][]float32, len(subProtos))
+		for i, c := range subProtos {
+			qProtos[i] = make([]float32, len(c))
+			for j, v := range c {
+				qProtos[i][j] = poly.SimulatePrecision(v, entry.dtype, scale)
+			}
+		}
+
+		installKMeans(qProtos, bestT)
+		vAcc, _ := evalWithVoting(net, whitenedValInputs, valLabels, 3)
+		tAcc, _ := evalWithVoting(net, whitenedTestInputs, testLabels, 3)
+		dtypeResults = append(dtypeResults, DTypeResult{entry.name, entry.bits, vAcc, tAcc})
+
+		marker := ""
+		if entry.dtype == poly.DTypeFloat32 { marker = "  ← baseline (before)" }
+		delta := vAcc - gen5Acc
+		fmt.Printf("  %-12s  %2d-bit  val=%5.1f%%  test=%5.1f%%  Δval=%+5.1f%%%s\n",
+			entry.name, entry.bits, vAcc, tAcc, delta, marker)
+	}
+
+	// Summary table
+	fmt.Println("\n╔══════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║             DTYPE PRECISION SWEEP — BEFORE vs AFTER                     ║")
+	fmt.Println("╠══════════════╦═══════╦═══════════╦═══════════╦══════════════════════════╣")
+	fmt.Println("║ DType        ║  Bits ║  Val Acc  ║ Test Acc  ║ Δ vs float32 (val)       ║")
+	fmt.Println("╠══════════════╬═══════╬═══════════╬═══════════╬══════════════════════════╣")
+	for _, r := range dtypeResults {
+		delta := r.valAcc - gen5Acc
+		n := min(int(math.Abs(delta)/0.5), 20)
+		ch := byte('v')
+		if delta >= 0 { ch = '^' }
+		barB := make([]byte, n)
+		for i := range n { barB[i] = ch }
+		bar := string(barB)
+		fmt.Printf("║ %-12s ║  %-3d  ║  %5.1f%%   ║  %5.1f%%   ║ %+5.1f%%  %-20s║\n",
+			r.name, r.bits, r.valAcc, r.testAcc, delta, bar)
+	}
+	fmt.Println("╠══════════════╩═══════╩═══════════╩═══════════╩══════════════════════════╣")
+	fmt.Printf( "║  BEFORE (float32 Gen5): val=%.1f%%  test=%.1f%%                               ║\n", gen5Acc, testAcc)
+	fmt.Println("║  All dtypes: centroids quantized via SimulatePrecision, distance in f32  ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════════════════╝")
 }
 
 // ── GENERATION HELPERS ─────────────────────────────────────────────────────
