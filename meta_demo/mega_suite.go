@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"strings"
 	"time"
 
@@ -40,6 +42,11 @@ type Result struct {
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Print("⏩ Skip all backpropagation training items? (1=yes / 0=no) [0]: ")
+	skipAllRaw, _ := reader.ReadString('\n')
+	skipAll := strings.TrimSpace(skipAllRaw) == "1"
 
 	scenarios := []Scenario{
 		scenario1_DenseGainDrift(),
@@ -65,7 +72,7 @@ func main() {
 		fmt.Printf("  %s\n", s.Description)
 		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-		r := runScenario(s)
+		r := runScenario(s, skipAll, reader)
 		results = append(results, r)
 	}
 
@@ -99,7 +106,7 @@ func main() {
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════════════════════╝")
 }
 
-func runScenario(s Scenario) Result {
+func runScenario(s Scenario, skipAll bool, reader *bufio.Reader) Result {
 	r := Result{Name: s.Name}
 
 	netMeta, netBack := s.Build()
@@ -153,10 +160,16 @@ func runScenario(s Scenario) Result {
 	config.Mode = poly.TrainingModeCPUNormal
 
 	startBack := time.Now()
-	_, _ = poly.Train(netBack, batches, config)
-	r.BackTime = time.Since(startBack)
-	r.BackHealed = quickEval(netBack, inputs, expected)
-	fmt.Printf("  [BackHeal]  Score: %.2f  |  Time: %v  |  Epochs: %d\n", r.BackHealed, r.BackTime, epochs)
+	if skipAll {
+		fmt.Printf("  [BackHeal]  SKIPPED (Global)\n")
+		r.BackHealed = 0
+		r.BackTime = 0
+	} else {
+		_, _ = poly.Train(netBack, batches, config)
+		r.BackTime = time.Since(startBack)
+		r.BackHealed = quickEval(netBack, inputs, expected)
+		fmt.Printf("  [BackHeal]  Score: %.2f  |  Time: %v  |  Epochs: %d\n", r.BackHealed, r.BackTime, epochs)
+	}
 
 	return r
 }

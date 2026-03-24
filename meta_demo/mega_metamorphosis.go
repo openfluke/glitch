@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/openfluke/loom/poly"
@@ -11,6 +14,7 @@ import (
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
+	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("=== THE MEGA METAMORPHOSIS BENCHMARK v3 (CPU-ONLY) ===")
 	fmt.Println("Scenario: 32-Layer Brain with Autonomous Heuristic Self-Repair")
@@ -73,10 +77,20 @@ func main() {
 	config.Verbose = true
 	config.Mode = poly.TrainingModeCPUNormal
 
-	startBack := time.Now()
-	_, _ = poly.Train(netBack, batches, config)
-	timeBack := time.Since(startBack)
-	scoreBack := eval("BackpropHealed", netBack, inputs, expected)
+	fmt.Print("\n⏩ Skip Traditional Backpropagation? (1=yes / 0=no) [0]: ")
+	skipBack, _ := reader.ReadString('\n')
+	var scoreBack float64
+	var timeBack time.Duration
+
+	if strings.TrimSpace(skipBack) == "1" {
+		fmt.Println("[*] Skipping backprop training.")
+		scoreBack = 0 // Or some indicator
+	} else {
+		startBack := time.Now()
+		_, _ = poly.Train(netBack, batches, config)
+		timeBack = time.Since(startBack)
+		scoreBack = eval("BackpropHealed", netBack, inputs, expected)
+	}
 
 	// ── 7. COMPARISON ──
 	fmt.Println("\n=========================================================")
