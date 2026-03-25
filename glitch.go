@@ -61,7 +61,7 @@ func main() {
 }
 
 func runTestingMode(reader *bufio.Reader) {
-	layers := []string{"CNN1", "CNN2", "CNN3", "MHA"}
+	layers := []string{"CNN1", "CNN2", "CNN3", "MHA", "Dense", "SwiGLU", "RNN", "LSTM", "Embedding", "Residual"}
 	fmt.Println("\n🧪 Layer Testing")
 	fmt.Println("  [0] All Layers")
 	for i, name := range layers {
@@ -129,6 +129,46 @@ func runLayerTests(reader *bufio.Reader, layerName string, testInput string) {
 			{"Training (6 modes × 21 types)", layer.RunMHATraining},
 			{"GPU Forward Parity", layer.RunMHAGPUForward},
 			{"GPU Backward Parity", layer.RunMHAGPUBackward},
+		}
+	case "Dense":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunDenseL1Caching},
+			{"Training (6 modes × 21 types)", layer.RunDenseTraining},
+			{"GPU Forward Parity", layer.RunDenseGPUForward},
+			{"GPU Backward Parity", layer.RunDenseGPUBackward},
+		}
+	case "SwiGLU":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunSwiGLUL1Caching},
+			{"Training (6 modes × 21 types)", layer.RunSwiGLUTraining},
+			{"GPU Forward Parity", layer.RunSwiGLUGPUForward},
+			{"GPU Backward Parity", layer.RunSwiGLUGPUBackward},
+		}
+	case "RNN":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunRNNL1Caching},
+			{"Training (6 modes × 21 types)", layer.RunRNNTraining},
+			{"GPU Forward Parity", layer.RunRNNGPUForward},
+			{"GPU Backward Parity", layer.RunRNNGPUBackward},
+		}
+	case "LSTM":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunLSTML1Caching},
+			{"Training (6 modes × 21 types)", layer.RunLSTMTraining},
+			{"GPU Forward Parity", layer.RunLSTMGPUForward},
+			{"GPU Backward Parity", layer.RunLSTMGPUBackward},
+		}
+	case "Embedding":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunEmbeddingL1Caching},
+			{"GPU Forward Parity", layer.RunEmbeddingGPUForward},
+			{"GPU Backward Parity", layer.RunEmbeddingGPUBackward},
+		}
+	case "Residual":
+		tests = []testEntry{
+			{"L1 Caching (CPU Normal / SC / MC)", layer.RunResidualL1Caching},
+			{"GPU Forward Parity", layer.RunResidualGPUForward},
+			{"GPU Backward Parity", layer.RunResidualGPUBackward},
 		}
 	default:
 		fmt.Printf("No tests registered for layer: %s\n", layerName)
