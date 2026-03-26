@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/openfluke/loom/poly"
+	"github.com/openfluke/webgpu/wgpu"
 )
 
 // ── Dense Tests ────────────────────────────────────────────────────────────────
@@ -125,13 +126,13 @@ func RunDenseL1Caching() {
 	}
 }
 
-// RunDenseTraining tests 3 CPU training modes × 21 numeric types (train + save/reload).
+// RunDenseTraining tests 6 training modes × 21 numeric types (train + save/reload).
 func RunDenseTraining() {
 	const (
-		batchSz    = 1
-		inputSize  = 32
-		outputSize = 16
-		epochs     = 5
+		batchSz    = 4
+		inputSize  = 256
+		outputSize = 128
+		epochs     = 10
 	)
 
 	type layerSpec struct {
@@ -357,32 +358,426 @@ func RunDenseTraining() {
 	}
 }
 
-// RunDenseGPUForward checks GPU availability and reports that GPU kernels for Dense
-// are not yet implemented.
+// RunDenseGPUForward compares CPU multi-core tiled vs GPU Normal/SC/MC forward pass
+// across all numerical types. The GPU always operates on dequantized float32 weights.
 func RunDenseGPUForward() {
 	fmt.Println("=== Dense GPU Forward — All Numerical Types ===")
 	fmt.Println()
+
 	net := poly.NewVolumetricNetwork(1, 1, 1, 1)
 	if err := net.InitWGPU(); err != nil {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
 	defer net.DestroyWGPU()
-	fmt.Println("GPU kernels for Dense are not yet implemented.")
-	fmt.Println("This test is a placeholder for future GPU support.")
+	ctx := net.GPUContext
+	scTile, mcTile := poly.DenseGPUTileSizes(ctx, poly.DTypeFloat32)
+	fmt.Printf("GPU ready — SC tile=%d  MC tile=%d\n\n", scTile, mcTile)
+
+	type result struct {
+		tCPUMC, tGPUNorm, tGPUSC, tGPUMC time.Duration
+		tileSize, scTile, mcTile          int
+		diffGN, diffGSC, diffGMC          float64
+		parityGN, parityGSC, parityGMC    bool
+	}
+
+	const (
+		inputSize  = 1024
+		outputSize = 512
+		batchSize  = 4
+		outElems   = batchSize * outputSize
+	)
+
+	gpuIters := 10
+
+	run := func(cfg typeConfig) result {
+		ws := poly.NewWeightStore(inputSize * outputSize)
+		for i := range ws.Master {
+			ws.Master[i] = 0.05
+		}
+		ws.Scale = cfg.scale
+		if cfg.dtype != poly.DTypeFloat32 {
+			ws.Morph(cfg.dtype)
+		}
+		l := poly.VolumetricLayer{
+			Network:      poly.NewVolumetricNetwork(1, 1, 1, 1),
+			Type:         poly.LayerDense,
+			InputHeight:  inputSize,
+			OutputHeight: outputSize,
+			DType:        cfg.dtype,
+			WeightStore:  ws,
+			UseTiling:    true,
+			TileSize:     0,
+		}
+		l.Network.EnableMultiCoreTiling = true
+		l.SyncToCPU()
+		tileSize := l.TileSize
+
+		input := poly.NewTensor[float32](batchSize, inputSize)
+		for i := range input.Data {
+			input.Data[i] = float32(i%11)*0.09 - 0.45
+		}
+
+		// CPU multi-core reference
+		var cpuMC *poly.Tensor[float32]
+		start := time.Now()
+		for i := 0; i < gpuIters; i++ {
+			_, cpuMC = poly.DenseForwardPolymorphic(&l, input)
+		}
+		tCPUMC := time.Since(start) / time.Duration(gpuIters)
+
+		// Build dequantized float32 weight buffer for GPU
+		// rawF32 returns the quantised-integer values as float32; multiply by scale
+		// to reproduce what the CPU fast-path computes: float32(q) * scale.
+		raw := rawF32(ws, cfg.dtype)
+		gpuW := make([]float32, len(raw))
+		for i, v := range raw {
+			gpuW[i] = v * cfg.scale
+		}
+
+		inputBuf, err := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label:    "DenseFwdInput",
+			Contents: wgpu.ToBytes(input.Data),
+			Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		if err != nil {
+			fmt.Printf("  input buf: %v\n", err)
+			return result{}
+		}
+		defer inputBuf.Destroy()
+
+		weightBuf, err := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label:    "DenseFwdWeights",
+			Contents: wgpu.ToBytes(gpuW),
+			Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		if err != nil {
+			fmt.Printf("  weight buf: %v\n", err)
+			return result{}
+		}
+		defer weightBuf.Destroy()
+
+		outputBuf, err := ctx.Device.CreateBuffer(&wgpu.BufferDescriptor{
+			Label: "DenseFwdOutput",
+			Size:  uint64(outElems * 4),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		if err != nil {
+			fmt.Printf("  output buf: %v\n", err)
+			return result{}
+		}
+		defer outputBuf.Destroy()
+
+		// Warmup
+		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, 32)
+		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, scTile)
+		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, mcTile)
+		ctx.Device.Poll(true, nil)
+
+		start = time.Now()
+		for i := 0; i < gpuIters; i++ {
+			ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, 32)
+		}
+		ctx.Device.Poll(true, nil)
+		tGPUNorm := time.Since(start) / time.Duration(gpuIters)
+		gpuNormOut, _ := ctx.ReadBuffer(outputBuf)
+
+		start = time.Now()
+		for i := 0; i < gpuIters; i++ {
+			ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, scTile)
+		}
+		ctx.Device.Poll(true, nil)
+		tGPUSC := time.Since(start) / time.Duration(gpuIters)
+		gpuSCOut, _ := ctx.ReadBuffer(outputBuf)
+
+		start = time.Now()
+		for i := 0; i < gpuIters; i++ {
+			ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, mcTile)
+		}
+		ctx.Device.Poll(true, nil)
+		tGPUMC := time.Since(start) / time.Duration(gpuIters)
+		gpuMCOut, _ := ctx.ReadBuffer(outputBuf)
+
+		diffGN, diffGSC, diffGMC := 0.0, 0.0, 0.0
+		for i := range cpuMC.Data {
+			if d := math.Abs(float64(cpuMC.Data[i] - gpuNormOut[i])); d > diffGN {
+				diffGN = d
+			}
+			if d := math.Abs(float64(cpuMC.Data[i] - gpuSCOut[i])); d > diffGSC {
+				diffGSC = d
+			}
+			if d := math.Abs(float64(cpuMC.Data[i] - gpuMCOut[i])); d > diffGMC {
+				diffGMC = d
+			}
+		}
+
+		return result{
+			tCPUMC: tCPUMC, tGPUNorm: tGPUNorm, tGPUSC: tGPUSC, tGPUMC: tGPUMC,
+			tileSize: tileSize, scTile: scTile, mcTile: mcTile,
+			diffGN: diffGN, diffGSC: diffGSC, diffGMC: diffGMC,
+			parityGN:  diffGN <= cfg.tolerance,
+			parityGSC: diffGSC <= cfg.tolerance,
+			parityGMC: diffGMC <= cfg.tolerance,
+		}
+	}
+
+	fmt.Printf("| %-10s | %-4s | %-12s | %-12s | %-12s | %-12s | %-6s | %-6s | %-6s | %-8s | %-8s | %-8s | %-6s | %-6s | %-6s |\n",
+		"DType", "Tile", "CPU MC", "GPU Norm(32)", "GPU SC", "GPU MC",
+		"GN-Spd", "SC-Spd", "MC-Spd", "Diff-GN", "Diff-SC", "Diff-MC", "GN-Par", "SC-Par", "MC-Par")
+	fmt.Println("|------------|------|--------------|--------------|--------------|--------------|--------|--------|--------|----------|----------|----------|--------|--------|--------|")
+
+	allPass := true
+	for _, cfg := range allTypes {
+		fmt.Printf("  running %-10s ...\r", cfg.name)
+		r := run(cfg)
+		if !r.parityGN || !r.parityGSC || !r.parityGMC {
+			allPass = false
+		}
+		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-6.1fx | %-6.1fx | %-6.1fx | %-8.2e | %-8.2e | %-8.2e | %-6s | %-6s | %-6s |\n",
+			cfg.name, r.tileSize, r.tCPUMC, r.tGPUNorm, r.tGPUSC, r.tGPUMC,
+			float64(r.tCPUMC)/float64(r.tGPUNorm),
+			float64(r.tCPUMC)/float64(r.tGPUSC),
+			float64(r.tCPUMC)/float64(r.tGPUMC),
+			r.diffGN, r.diffGSC, r.diffGMC,
+			parityMark(r.parityGN), parityMark(r.parityGSC), parityMark(r.parityGMC))
+	}
+	fmt.Println()
+	if allPass {
+		fmt.Println("✅ All GPU forward parity checks passed!")
+	} else {
+		fmt.Println("❌ One or more GPU forward parity checks FAILED.")
+	}
 }
 
-// RunDenseGPUBackward checks GPU availability and reports that GPU kernels for Dense
-// are not yet implemented.
+// RunDenseGPUBackward compares CPU multi-core tiled vs GPU Normal/SC/MC backward pass
+// (gradInput and gradWeights) using Float32 weights for a clean float-exact comparison.
 func RunDenseGPUBackward() {
 	fmt.Println("=== Dense GPU Backward — All Numerical Types ===")
 	fmt.Println()
+
 	net := poly.NewVolumetricNetwork(1, 1, 1, 1)
 	if err := net.InitWGPU(); err != nil {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
 	defer net.DestroyWGPU()
-	fmt.Println("GPU kernels for Dense are not yet implemented.")
-	fmt.Println("This test is a placeholder for future GPU support.")
+	ctx := net.GPUContext
+	scTile, mcTile := poly.DenseGPUTileSizes(ctx, poly.DTypeFloat32)
+	fmt.Printf("GPU ready — SC tile=%d  MC tile=%d\n\n", scTile, mcTile)
+
+	type result struct {
+		tCPUMC, tGPUNorm, tGPUSC, tGPUMC    time.Duration
+		scTile, mcTile                        int
+		diffDXNorm, diffDWNorm                float64
+		diffDXSC, diffDWSC                    float64
+		diffDXMC, diffDWMC                    float64
+		parityNorm, paritySC, parityMC        bool
+	}
+
+	const (
+		inputSize  = 1024
+		outputSize = 512
+		batchSize  = 4
+		weightSize = inputSize * outputSize
+	)
+
+	gpuIters := 10
+
+	run := func(cfg typeConfig) result {
+		// Use float32 weights for a precise CPU↔GPU comparison.
+		// For quantised dtypes, dequantise the weight store into a plain float32 layer.
+		ws := poly.NewWeightStore(weightSize)
+		for i := range ws.Master {
+			ws.Master[i] = 0.05
+		}
+		ws.Scale = cfg.scale
+		if cfg.dtype != poly.DTypeFloat32 {
+			ws.Morph(cfg.dtype)
+		}
+
+		// Build dequantised float32 weights the same way RunDenseGPUForward does
+		raw := rawF32(ws, cfg.dtype)
+		gpuW := make([]float32, len(raw))
+		for i, v := range raw {
+			gpuW[i] = v * cfg.scale
+		}
+
+		// Float32 layer for CPU backward reference
+		wsF32 := poly.NewWeightStore(weightSize)
+		copy(wsF32.Master, gpuW)
+
+		l := poly.VolumetricLayer{
+			Network:      poly.NewVolumetricNetwork(1, 1, 1, 1),
+			Type:         poly.LayerDense,
+			InputHeight:  inputSize,
+			OutputHeight: outputSize,
+			DType:        poly.DTypeFloat32,
+			WeightStore:  wsF32,
+			UseTiling:    true,
+			Activation:   poly.ActivationLinear,
+		}
+		l.Network.EnableMultiCoreTiling = true
+		l.SyncToCPU()
+
+		gradOut := poly.NewTensor[float32](batchSize, outputSize)
+		for i := range gradOut.Data {
+			gradOut.Data[i] = float32(i%7)*0.1 - 0.3
+		}
+		input := poly.NewTensor[float32](batchSize, inputSize)
+		for i := range input.Data {
+			input.Data[i] = float32(i%11)*0.09 - 0.45
+		}
+		preAct := poly.NewTensor[float32](batchSize, outputSize)
+		for i := range preAct.Data {
+			preAct.Data[i] = float32(i%5)*0.2 - 0.4
+		}
+
+		// CPU backward reference (MC tiled)
+		var cpuDX, cpuDW *poly.Tensor[float32]
+		start := time.Now()
+		for i := 0; i < gpuIters; i++ {
+			cpuDX, cpuDW = poly.DenseBackwardTiled(&l, gradOut, input, preAct)
+		}
+		tCPUMC := time.Since(start) / time.Duration(gpuIters)
+
+		gradOutBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label: "BwdGO", Contents: wgpu.ToBytes(gradOut.Data),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		weightBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label: "BwdW", Contents: wgpu.ToBytes(gpuW),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		inputBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label: "BwdIn", Contents: wgpu.ToBytes(input.Data),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		defer gradOutBuf.Destroy()
+		defer weightBuf.Destroy()
+		defer inputBuf.Destroy()
+
+		timingDX, _ := zeroF32Buf(ctx, batchSize*inputSize, "TimingDX")
+		timingDW, _ := zeroF32Buf(ctx, weightSize, "TimingDW")
+		defer timingDX.Destroy()
+		defer timingDW.Destroy()
+
+		// Warmup
+		{
+			gi, _ := zeroF32Buf(ctx, batchSize*inputSize, "WarmDX")
+			gw, _ := zeroF32Buf(ctx, weightSize, "WarmDW")
+			ctx.DispatchDenseBackwardDX(batchSize, inputSize, outputSize, gradOutBuf, weightBuf, gi, 32)
+			ctx.DispatchDenseBackwardDW(batchSize, inputSize, outputSize, gradOutBuf, inputBuf, gw, 32)
+			ctx.Device.Poll(true, nil)
+			gi.Destroy()
+			gw.Destroy()
+		}
+
+		dispatchBwd := func(tileSize int) ([]float32, []float32) {
+			dxBuf, _ := zeroF32Buf(ctx, batchSize*inputSize, "DX")
+			dwBuf, _ := zeroF32Buf(ctx, weightSize, "DW")
+			defer dxBuf.Destroy()
+			defer dwBuf.Destroy()
+			ctx.DispatchDenseBackwardDX(batchSize, inputSize, outputSize, gradOutBuf, weightBuf, dxBuf, tileSize)
+			ctx.DispatchDenseBackwardDW(batchSize, inputSize, outputSize, gradOutBuf, inputBuf, dwBuf, tileSize)
+			ctx.Device.Poll(true, nil)
+			dx, _ := ctx.ReadBuffer(dxBuf)
+			dw, _ := ctx.ReadBuffer(dwBuf)
+			return dx, dw
+		}
+
+		// Norm (tile=32)
+		var normTotal time.Duration
+		var gpuNormDX, gpuNormDW []float32
+		for i := 0; i < gpuIters; i++ {
+			t0 := time.Now()
+			ctx.DispatchDenseBackwardDX(batchSize, inputSize, outputSize, gradOutBuf, weightBuf, timingDX, 32)
+			ctx.DispatchDenseBackwardDW(batchSize, inputSize, outputSize, gradOutBuf, inputBuf, timingDW, 32)
+			ctx.Device.Poll(true, nil)
+			normTotal += time.Since(t0)
+		}
+		tGPUNorm := normTotal / time.Duration(gpuIters)
+		gpuNormDX, gpuNormDW = dispatchBwd(32)
+
+		// SC
+		var scTotal time.Duration
+		var gpuSCDX, gpuSCDW []float32
+		for i := 0; i < gpuIters; i++ {
+			t0 := time.Now()
+			ctx.DispatchDenseBackwardDX(batchSize, inputSize, outputSize, gradOutBuf, weightBuf, timingDX, scTile)
+			ctx.DispatchDenseBackwardDW(batchSize, inputSize, outputSize, gradOutBuf, inputBuf, timingDW, scTile)
+			ctx.Device.Poll(true, nil)
+			scTotal += time.Since(t0)
+		}
+		tGPUSC := scTotal / time.Duration(gpuIters)
+		gpuSCDX, gpuSCDW = dispatchBwd(scTile)
+
+		// MC
+		var mcTotal time.Duration
+		var gpuMCDX, gpuMCDW []float32
+		for i := 0; i < gpuIters; i++ {
+			t0 := time.Now()
+			ctx.DispatchDenseBackwardDX(batchSize, inputSize, outputSize, gradOutBuf, weightBuf, timingDX, mcTile)
+			ctx.DispatchDenseBackwardDW(batchSize, inputSize, outputSize, gradOutBuf, inputBuf, timingDW, mcTile)
+			ctx.Device.Poll(true, nil)
+			mcTotal += time.Since(t0)
+		}
+		tGPUMC := mcTotal / time.Duration(gpuIters)
+		gpuMCDX, gpuMCDW = dispatchBwd(mcTile)
+
+		maxD := func(cpu []float32, gpu []float32) float64 {
+			d := 0.0
+			for i := range cpu {
+				if v := math.Abs(float64(cpu[i] - gpu[i])); v > d {
+					d = v
+				}
+			}
+			return d
+		}
+
+		diffDXNorm := maxD(cpuDX.Data, gpuNormDX)
+		diffDWNorm := maxD(cpuDW.Data, gpuNormDW)
+		diffDXSC := maxD(cpuDX.Data, gpuSCDX)
+		diffDWSC := maxD(cpuDW.Data, gpuSCDW)
+		diffDXMC := maxD(cpuDX.Data, gpuMCDX)
+		diffDWMC := maxD(cpuDW.Data, gpuMCDW)
+
+		tol := cfg.tolerance
+		return result{
+			tCPUMC: tCPUMC, tGPUNorm: tGPUNorm, tGPUSC: tGPUSC, tGPUMC: tGPUMC,
+			scTile: scTile, mcTile: mcTile,
+			diffDXNorm: diffDXNorm, diffDWNorm: diffDWNorm,
+			diffDXSC: diffDXSC, diffDWSC: diffDWSC,
+			diffDXMC: diffDXMC, diffDWMC: diffDWMC,
+			parityNorm: diffDXNorm <= tol && diffDWNorm <= tol,
+			paritySC:   diffDXSC <= tol && diffDWSC <= tol,
+			parityMC:   diffDXMC <= tol && diffDWMC <= tol,
+		}
+	}
+
+	fmt.Printf("| %-10s | %-12s | %-12s | %-12s | %-12s | %-6s | %-6s | %-6s | %-8s | %-8s | %-8s | %-6s | %-6s | %-6s |\n",
+		"DType", "CPU MC", "GPU Norm(32)", "GPU SC", "GPU MC",
+		"GN-Spd", "SC-Spd", "MC-Spd", "DX-GN", "DX-SC", "DX-MC", "Norm", "SC", "MC")
+	fmt.Println("|------------|--------------|--------------|--------------|--------------|--------|--------|--------|----------|----------|----------|--------|--------|--------|")
+
+	allPass := true
+	for _, cfg := range allTypes {
+		fmt.Printf("  running %-10s ...\r", cfg.name)
+		r := run(cfg)
+		if !r.parityNorm || !r.paritySC || !r.parityMC {
+			allPass = false
+		}
+		fmt.Printf("| %-10s | %-12v | %-12v | %-12v | %-12v | %-6.1fx | %-6.1fx | %-6.1fx | %-8.2e | %-8.2e | %-8.2e | %-6s | %-6s | %-6s |\n",
+			cfg.name, r.tCPUMC, r.tGPUNorm, r.tGPUSC, r.tGPUMC,
+			float64(r.tCPUMC)/float64(r.tGPUNorm),
+			float64(r.tCPUMC)/float64(r.tGPUSC),
+			float64(r.tCPUMC)/float64(r.tGPUMC),
+			r.diffDXNorm, r.diffDXSC, r.diffDXMC,
+			parityMark(r.parityNorm), parityMark(r.paritySC), parityMark(r.parityMC))
+	}
+	fmt.Println()
+	if allPass {
+		fmt.Println("✅ All GPU backward parity checks passed!")
+	} else {
+		fmt.Println("❌ One or more GPU backward parity checks FAILED.")
+	}
 }
