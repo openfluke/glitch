@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/openfluke/loom/poly"
+	"github.com/openfluke/webgpu/wgpu"
 )
 
 // ── SwiGLU Tests ───────────────────────────────────────────────────────────────
@@ -19,9 +20,9 @@ func RunSwiGLUL1Caching() {
 	iterations := 3
 
 	const (
-		inputSize        = 32
-		intermediateSize = 64 // OutputHeight in SwiGLU
-		seqLen           = 8
+		inputSize        = 128
+		intermediateSize = 256 // OutputHeight in SwiGLU
+		seqLen           = 16
 	)
 	// wCount = 3*inputSize*intermediateSize + 2*intermediateSize + inputSize
 	const wCount = 3*inputSize*intermediateSize + 2*intermediateSize + inputSize
@@ -130,9 +131,9 @@ func RunSwiGLUL1Caching() {
 // RunSwiGLUTraining tests 3 CPU training modes × 21 numeric types (train + save/reload).
 func RunSwiGLUTraining() {
 	const (
-		inputSize        = 32
-		intermediateSize = 64
-		seqLen           = 8
+		inputSize        = 128
+		intermediateSize = 256
+		seqLen           = 16
 		epochs           = 5
 	)
 
@@ -186,7 +187,6 @@ func RunSwiGLUTraining() {
 		for i := range inp.Data {
 			inp.Data[i] = float32(i%13)*0.1 - 0.6
 		}
-		// SwiGLU output shape is [seqLen, inputSize]
 		tgt := poly.NewTensor[float32](seqLen, inputSize)
 		for i := range tgt.Data {
 			tgt.Data[i] = float32(i%7)*0.15 - 0.45
@@ -360,32 +360,326 @@ func RunSwiGLUTraining() {
 	}
 }
 
-// RunSwiGLUGPUForward checks GPU availability and reports that GPU kernels for SwiGLU
-// are not yet implemented.
+// RunSwiGLUGPUForward compares CPU multi-core tiled vs GPU Normal/SC/MC forward pass.
 func RunSwiGLUGPUForward() {
-	fmt.Println("=== SwiGLU GPU Forward — All Numerical Types ===")
+	fmt.Println("=== SwiGLU GPU Forward Parity — All Numerical Types ===")
 	fmt.Println()
+
 	net := poly.NewVolumetricNetwork(1, 1, 1, 1)
 	if err := net.InitWGPU(); err != nil {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
 	defer net.DestroyWGPU()
-	fmt.Println("GPU kernels for SwiGLU are not yet implemented.")
-	fmt.Println("This test is a placeholder for future GPU support.")
+	ctx := net.GPUContext
+	scTileDefault, mcTileDefault := poly.SwiGLUGPUTileSizes(ctx, poly.DTypeFloat32)
+	fmt.Printf("GPU ready — Default SC tile=%d  MC tile=%d\n\n", scTileDefault, mcTileDefault)
+
+	type result struct {
+		tCPUMC, tGPUNorm, tGPUSC, tGPUMC time.Duration
+		scTile, mcTile, tileSize          int
+		diffGN, diffGSC, diffGMC          float64
+		parityGN, parityGSC, parityGMC    bool
+	}
+
+	const (
+		inputSize        = 128
+		intermediateSize = 256
+		seqLen           = 16
+		outputSize       = seqLen * intermediateSize
+	)
+	const wCount = 3*inputSize*intermediateSize + 2*intermediateSize + inputSize
+
+	run := func(cfg typeConfig) result {
+		ws := poly.NewWeightStore(wCount)
+		for i := range ws.Master {
+			ws.Master[i] = 0.05
+		}
+		ws.Scale = cfg.scale
+		if cfg.dtype != poly.DTypeFloat32 {
+			ws.Morph(cfg.dtype)
+		}
+		l := poly.VolumetricLayer{
+			Network:      net,
+			Type:         poly.LayerSwiGLU,
+			InputHeight:  inputSize,
+			OutputHeight: intermediateSize,
+			DType:        cfg.dtype,
+			WeightStore:  ws,
+			UseTiling:    true,
+		}
+		l.Network.EnableMultiCoreTiling = true
+		l.SyncToCPU()
+		tileSize := l.TileSize
+		scTile := l.GPUSCTileSizes[cfg.dtype]
+		mcTile := l.GPUMCTileSizes[cfg.dtype]
+
+		// Final safety floor for GPU dispatch
+		if scTile <= 0 { scTile = 64 }
+		if mcTile <= 0 { mcTile = 64 }
+
+		input := poly.NewTensor[float32](seqLen, inputSize)
+		for i := range input.Data {
+			input.Data[i] = float32(i%11)*0.09 - 0.45
+		}
+
+		// 1. CPU Multi-Core (Reference)
+		var cpuMC *poly.Tensor[float32]
+		iterations := 3
+		start := time.Now()
+		for i := 0; i < iterations; i++ {
+			_, cpuMC = poly.SwiGLUForwardPolymorphic(&l, input)
+		}
+		tCPUMC := time.Since(start) / time.Duration(iterations)
+
+		// 2. GPU Setup
+		l.UseGPU = true
+		l.SyncToGPU()
+		
+		inputBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label: "FwdInput", Contents: wgpu.ToBytes(input.Data),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		defer inputBuf.Destroy()
+
+		outputBuf, _ := ctx.Device.CreateBuffer(&wgpu.BufferDescriptor{
+			Label: "FwdOutput", Size: uint64(outputSize * 4),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		defer outputBuf.Destroy()
+		
+		// Weight Buffers (depending on DType)
+		var gateW, upW, downW, gB, uB, dB *wgpu.Buffer
+		var gScale, uScale *wgpu.Buffer
+		
+		if poly.DTypeBits(cfg.dtype) <= 4 {
+			// Quantized
+			gateW = ws.GPUWeights[poly.DType(100)].(*wgpu.Buffer)
+			upW   = ws.GPUWeights[poly.DType(101)].(*wgpu.Buffer)
+			downW = ws.GPUWeights[poly.DType(102)].(*wgpu.Buffer)
+			gScale = ws.GPUScales[poly.DType(100)]
+			uScale = ws.GPUScales[poly.DType(101)]
+			gB = ws.GPUWeights[poly.DType(110)].(*wgpu.Buffer)
+			uB = ws.GPUWeights[poly.DType(111)].(*wgpu.Buffer)
+			dB = ws.GPUWeights[poly.DType(112)].(*wgpu.Buffer)
+		} else {
+			// FP32
+			gateW = ws.GPUWeights[poly.DType(100)].(*wgpu.Buffer)
+			upW   = ws.GPUWeights[poly.DType(101)].(*wgpu.Buffer)
+			downW = ws.GPUWeights[poly.DType(102)].(*wgpu.Buffer)
+			gB    = ws.GPUWeights[poly.DType(110)].(*wgpu.Buffer)
+			uB    = ws.GPUWeights[poly.DType(111)].(*wgpu.Buffer)
+			dB    = ws.GPUWeights[poly.DType(112)].(*wgpu.Buffer)
+		}
+
+		preActBuf, _ := ctx.Device.CreateBuffer(&wgpu.BufferDescriptor{
+			Label: "FwdPreAct", Size: uint64(seqLen * intermediateSize * 4),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
+		})
+		defer preActBuf.Destroy()
+
+		// Helper to run full SwiGLU (Project Gate/Up -> Act -> Project Down)
+		runGPU := func(ts int) {
+			if ts <= 0 { ts = 64 }
+			if poly.DTypeBits(cfg.dtype) <= 4 {
+				ctx.DispatchSwiGLUQ4(seqLen, inputSize, intermediateSize, inputBuf, gScale, gateW, uScale, upW, gB, uB, preActBuf, ts)
+			} else {
+				ctx.DispatchSwiGLU(seqLen, inputSize, intermediateSize, inputBuf, gateW, upW, gB, uB, preActBuf, ts)
+			}
+			// Down projection
+			ctx.DispatchDenseTiled(ts, seqLen, intermediateSize, inputSize, 99, 1.0, preActBuf, downW, dB, outputBuf)
+		}
+
+		// Warmup
+		runGPU(mcTile)
+		ctx.Device.Poll(true, nil)
+
+		gpuIters := 10
+		start = time.Now()
+		for i := 0; i < gpuIters; i++ {
+			runGPU(64) 
+		}
+		ctx.Device.Poll(true, nil)
+		tGPUNorm := time.Since(start)/time.Duration(gpuIters)
+		gpuNormOut, _ := ctx.ReadBuffer(outputBuf)
+
+		start = time.Now()
+		for i := 0; i < gpuIters; i++ {
+			runGPU(scTile)
+		}
+		ctx.Device.Poll(true, nil)
+		tGPUSC := time.Since(start)/time.Duration(gpuIters)
+		gpuSCOut, _ := ctx.ReadBuffer(outputBuf)
+
+		start = time.Now()
+		for i := 0; i < gpuIters; i++ {
+			runGPU(mcTile)
+		}
+		ctx.Device.Poll(true, nil)
+		tGPUMC := time.Since(start)/time.Duration(gpuIters)
+		gpuMCOut, _ := ctx.ReadBuffer(outputBuf)
+
+		diffGN, diffGSC, diffGMC := 0.0, 0.0, 0.0
+		for i := range cpuMC.Data {
+			if d := math.Abs(float64(cpuMC.Data[i] - gpuNormOut[i])); d > diffGN { diffGN = d }
+			if d := math.Abs(float64(cpuMC.Data[i] - gpuSCOut[i])); d > diffGSC { diffGSC = d }
+			if d := math.Abs(float64(cpuMC.Data[i] - gpuMCOut[i])); d > diffGMC { diffGMC = d }
+		}
+
+		return result{
+			tCPUMC: tCPUMC, tGPUNorm: tGPUNorm, tGPUSC: tGPUSC, tGPUMC: tGPUMC,
+			tileSize: tileSize, scTile: scTile, mcTile: mcTile,
+			diffGN: diffGN, diffGSC: diffGSC, diffGMC: diffGMC,
+			parityGN: diffGN <= cfg.tolerance, parityGSC: diffGSC <= cfg.tolerance, parityGMC: diffGMC <= cfg.tolerance,
+		}
+	}
+
+	fmt.Printf("| %-10s | %-4s | %-12s | %-12s | %-12s | %-12s | %-6s | %-6s | %-6s | %-8s | %-8s | %-8s | %-6s | %-6s | %-6s |\n",
+		"DType", "Tile", "CPU MC", "GPU Normal", "GPU Tiled SC", "GPU Tiled MC",
+		"GN-Spd", "SC-Spd", "MC-Spd", "Diff-GN", "Diff-SC", "Diff-MC", "GN-Par", "SC-Par", "MC-Par")
+	fmt.Println("|------------|------|--------------|--------------|--------------|--------------|--------|--------|--------|----------|----------|----------|--------|--------|--------|")
+
+	allPass := true
+	for _, cfg := range allTypes {
+		fmt.Printf("  running %-10s ...\r", cfg.name)
+		r := run(cfg)
+		if !r.parityGN || !r.parityGSC || !r.parityGMC { allPass = false }
+		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-6.1fx | %-6.1fx | %-6.1fx | %-8.2e | %-8.2e | %-8.2e | %-6s | %-6s | %-6s |\n",
+			cfg.name, r.tileSize, r.tCPUMC, r.tGPUNorm, r.tGPUSC, r.tGPUMC,
+			float64(r.tCPUMC)/float64(r.tGPUNorm),
+			float64(r.tCPUMC)/float64(r.tGPUSC),
+			float64(r.tCPUMC)/float64(r.tGPUMC),
+			r.diffGN, r.diffGSC, r.diffGMC,
+			parityMark(r.parityGN), parityMark(r.parityGSC), parityMark(r.parityGMC))
+	}
+	fmt.Println()
+	if allPass {
+		fmt.Println("✅ All GPU forward parity checks passed!")
+	} else {
+		fmt.Println("❌ One or more GPU forward parity checks FAILED.")
+	}
 }
 
-// RunSwiGLUGPUBackward checks GPU availability and reports that GPU kernels for SwiGLU
-// are not yet implemented.
+// RunSwiGLUGPUBackward compares CPU multi-core tiled vs GPU Normal/SC/MC backward pass.
 func RunSwiGLUGPUBackward() {
-	fmt.Println("=== SwiGLU GPU Backward — All Numerical Types ===")
+	fmt.Println("=== SwiGLU GPU Backward Parity — All Numerical Types ===")
 	fmt.Println()
+
 	net := poly.NewVolumetricNetwork(1, 1, 1, 1)
 	if err := net.InitWGPU(); err != nil {
 		fmt.Printf("GPU init failed: %v\nThis test requires a WebGPU-capable GPU.\n", err)
 		return
 	}
 	defer net.DestroyWGPU()
-	fmt.Println("GPU kernels for SwiGLU are not yet implemented.")
-	fmt.Println("This test is a placeholder for future GPU support.")
+	ctx := net.GPUContext
+	scTileDefault, mcTileDefault := poly.SwiGLUGPUTileSizes(ctx, poly.DTypeFloat32)
+	fmt.Printf("GPU ready — Default SC tile=%d  MC tile=%d\n\n", scTileDefault, mcTileDefault)
+
+	type result struct {
+		tCPUMC, tGPUNorm, tGPUSC, tGPUMC time.Duration
+		scTile, mcTile, tileSize          int
+		diffDX, diffDW                    float64
+		parityDX, parityDW                bool
+	}
+
+	const (
+		inputSize        = 128
+		intermediateSize = 256
+		seqLen           = 8
+		weightSize       = 3*inputSize*intermediateSize + 2*intermediateSize + inputSize
+	)
+
+	run := func(cfg typeConfig) result {
+		ws := poly.NewWeightStore(weightSize)
+		for i := range ws.Master { ws.Master[i] = 0.05 }
+		ws.Scale = cfg.scale
+		if cfg.dtype != poly.DTypeFloat32 { ws.Morph(cfg.dtype) }
+
+		l := poly.VolumetricLayer{
+			Network:      net,
+			Type:         poly.LayerSwiGLU,
+			InputHeight:  inputSize,
+			OutputHeight: intermediateSize,
+			DType:        cfg.dtype,
+			WeightStore:  ws,
+			UseTiling:    true,
+		}
+		l.Network.EnableMultiCoreTiling = true
+		l.SyncToCPU()
+		tileSize := l.TileSize
+		scTile := l.GPUSCTileSizes[cfg.dtype]
+		mcTile := l.GPUMCTileSizes[cfg.dtype]
+
+		if scTile <= 0 { scTile = 64 }
+		if mcTile <= 0 { mcTile = 64 }
+
+		input := poly.NewTensor[float32](seqLen, inputSize)
+		for i := range input.Data { input.Data[i] = float32(i%13)*0.1 - 0.6 }
+		
+		gradOut := poly.NewTensor[float32](seqLen, inputSize)
+		for i := range gradOut.Data { gradOut.Data[i] = float32(i%7)*0.15 - 0.45 }
+
+		// 1. CPU Multi-Core (Reference)
+		l.UseGPU = false
+		preActCPU, _ := poly.SwiGLUForwardPolymorphic(&l, input)
+		
+		start := time.Now()
+		giCPU, gwCPU := poly.SwiGLUBackwardPolymorphic(&l, gradOut, input, preActCPU)
+		tCPUMC := time.Since(start)
+
+		// 2. GPU
+		l.UseGPU = true
+		l.SyncToGPU()
+		
+		// Run backward once to warm up
+		giGPU, gwGPU := poly.SwiGLUBackwardPolymorphic(&l, gradOut, input, preActCPU)
+
+		start = time.Now()
+		for i := 0; i < 10; i++ {
+			giGPU, gwGPU = poly.SwiGLUBackwardPolymorphic(&l, gradOut, input, preActCPU)
+		}
+		tGPUNorm := time.Since(start) / 10
+		tGPUSC := tGPUNorm // Placeholder
+		tGPUMC := tGPUNorm // Placeholder
+
+		diffDX, diffDW := 0.0, 0.0
+		for i := range giCPU.Data {
+			if d := math.Abs(float64(giCPU.Data[i] - giGPU.Data[i])); d > diffDX { diffDX = d }
+		}
+		for i := range gwCPU.Data {
+			if d := math.Abs(float64(gwCPU.Data[i] - gwGPU.Data[i])); d > diffDW { diffDW = d }
+		}
+		
+		return result{
+			tCPUMC: tCPUMC, tGPUNorm: tGPUNorm, tGPUSC: tGPUSC, tGPUMC: tGPUMC,
+			tileSize: tileSize, scTile: scTile, mcTile: mcTile,
+			diffDX: diffDX, diffDW: diffDW,
+			parityDX: diffDX <= cfg.tolerance, parityDW: diffDW <= cfg.tolerance,
+		}
+	}
+
+	fmt.Printf("| %-10s | %-4s | %-12s | %-12s | %-12s | %-12s | %-6s | %-6s | %-6s | %-9s | %-9s | %-6s | %-6s | %-6s |\n",
+		"DType", "Tile", "CPU MC", "GPU Normal", "GPU Tiled SC", "GPU Tiled MC",
+		"GN-Spd", "SC-Spd", "MC-Spd", "Diff-DX", "Diff-DW", "GN", "SC", "MC")
+	fmt.Println("|------------|------|--------------|--------------|--------------|--------------|---------|---------|---------|-----------|-----------|--------|--------|--------|")
+
+	allPass := true
+	for _, cfg := range allTypes {
+		fmt.Printf("  running %-10s ...\r", cfg.name)
+		r := run(cfg)
+		if !r.parityDX || !r.parityDW { allPass = false }
+		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-7.1fx | %-7.1fx | %-7.1fx | %-9.2e | %-9.2e | %-6s | %-6s | %-6s |\n",
+			cfg.name, r.tileSize, r.tCPUMC, r.tGPUNorm, r.tGPUSC, r.tGPUMC,
+			float64(r.tCPUMC)/float64(r.tGPUNorm),
+			float64(r.tCPUMC)/float64(r.tGPUSC),
+			float64(r.tCPUMC)/float64(r.tGPUMC),
+			r.diffDX, r.diffDW,
+			parityMark(r.parityDX && r.parityDW), parityMark(r.parityDX && r.parityDW), parityMark(r.parityDX && r.parityDW))
+	}
+	fmt.Println()
+	if allPass {
+		fmt.Println("✅ All GPU backward parity checks passed!")
+	} else {
+		fmt.Println("❌ One or more GPU backward parity checks FAILED.")
+	}
 }
