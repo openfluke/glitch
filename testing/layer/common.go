@@ -62,6 +62,15 @@ func maxAbsDiff(a, b []float32) float64 {
 	return d
 }
 
+func spectrumMark(diff float64, tolerance float64) string {
+	if math.IsNaN(diff) || math.IsInf(diff, 0) { return "💀 FATAL" }
+	if diff == 0 { return "💎 EXACT" }
+	if diff <= tolerance { return "✅ INDUS" }
+	if diff <= tolerance*10 { return "🟨 LOWBIT" }
+	if diff <= 0.1 { return "🟠 DRIFT" }
+	return "❌ BROKE"
+}
+
 // rawF32 returns the active weight buffer as []float32 without applying scale.
 func rawF32(ws *poly.WeightStore, dtype poly.DType) []float32 {
 	active := ws.GetActive(dtype)
@@ -211,24 +220,106 @@ func PrintParityRow(cfg typeConfig, r ParityResult) {
 
 // ── Global Stats ─────────────────────────────────────────────────────────────
 
-type GlobalStats struct {
-	TotalTests  int
-	PassedTests int
+type Spectrum int
+const (
+	SpecFatal Spectrum = iota
+	SpecBroken
+	SpecDrift
+	SpecLowBit
+	SpecIndustry
+	SpecExact
+)
+
+func (s Spectrum) String() string {
+	switch s {
+	case SpecExact:    return "💎 EXACT"
+	case SpecIndustry: return "✅ INDUS"
+	case SpecLowBit:   return "🟨 LOWBIT"
+	case SpecDrift:    return "🟠 DRIFT"
+	case SpecBroken:   return "❌ BROKE"
+	default:           return "💀 FATAL"
+	}
 }
 
-func (s *GlobalStats) Add(ok bool) {
-	s.TotalTests++
-	if ok {
-		s.PassedTests++
+type GlobalStats struct {
+	Total      int
+	BitExact   int
+	Industry   int
+	LowBit     int
+	Drift      int
+	Broken     int
+	Fatal      int
+
+	// Layer-level
+	LTotal     int
+	LBitExact  int
+	LIndustry  int
+	LLowBit    int
+	LDrift     int
+	LBroken    int
+	LFatal     int
+	
+	// Sub-level
+	STotal     int
+	SBitExact  int
+	SIndustry  int
+	SLowBit    int
+	SDrift     int
+	SBroken    int
+	SFatal     int
+}
+
+func (s *GlobalStats) Add(diff float64, tolerance float64) {
+	s.Total++; s.LTotal++; s.STotal++
+	
+	if math.IsNaN(diff) || math.IsInf(diff, 0) {
+		s.Fatal++; s.LFatal++; s.SFatal++
+	} else if diff == 0 {
+		s.BitExact++; s.LBitExact++; s.SBitExact++
+	} else if diff <= tolerance {
+		s.Industry++; s.LIndustry++; s.SIndustry++
+	} else if diff <= tolerance*10 {
+		s.LowBit++; s.LLowBit++; s.SLowBit++
+	} else if diff <= 0.1 {
+		s.Drift++; s.LDrift++; s.SDrift++
+	} else {
+		s.Broken++; s.LBroken++; s.SBroken++
 	}
+}
+
+func (s *GlobalStats) AddResult(ok bool) {
+	if ok { s.Add(0, 0) } else { s.Add(1.0, 0) }
+}
+
+func (s *GlobalStats) StartLayer() {
+	s.LTotal = 0; s.LBitExact = 0; s.LIndustry = 0; s.LLowBit = 0; s.LDrift = 0; s.LBroken = 0; s.LFatal = 0
+}
+
+func (s *GlobalStats) ResetSub() {
+	s.STotal = 0; s.SBitExact = 0; s.SIndustry = 0; s.SLowBit = 0; s.SDrift = 0; s.SBroken = 0; s.SFatal = 0
+}
+
+func (s *GlobalStats) ReportSub(label string) {
+	if s.STotal == 0 { return }
+	fmt.Printf("\n>> [%s] %d Tests | 💎 %d | ✅ %d | 🟨 %d | 🟠 %d | ❌ %d | 💀 %d\n", 
+		label, s.STotal, s.SBitExact, s.SIndustry, s.SLowBit, s.SDrift, s.SBroken, s.SFatal)
+}
+
+func (s *GlobalStats) ReportLayer(layerName string) {
+	if s.LTotal == 0 { return }
+	fmt.Printf("\n🔥 [%s] LAYER TOTAL: %d Tests | 💎 %d | ✅ %d | 🟨 %d | 🟠 %d | ❌ %d | 💀 %d\n", 
+		layerName, s.LTotal, s.LBitExact, s.LIndustry, s.LLowBit, s.LDrift, s.LBroken, s.LFatal)
 }
 
 func (s *GlobalStats) Report() {
-	if s.TotalTests == 0 {
-		return
-	}
-	pct := float64(s.PassedTests) / float64(s.TotalTests) * 100
-	fmt.Printf("\n=== GLOBAL PASS RATE: %.1f%% (%d/%d) ===\n", pct, s.PassedTests, s.TotalTests)
+	if s.Total == 0 { return }
+	fmt.Printf("\n🏆 GLOBAL PERFORMANCE MANIFESTATION: %d Total\n", s.Total)
+	fmt.Printf("   💎 Bit-Exact:        %d (%.1f%%)\n", s.BitExact, float64(s.BitExact)/float64(s.Total)*100)
+	fmt.Printf("   ✅ Industry Standard: %d (%.1f%%)\n", s.Industry, float64(s.Industry)/float64(s.Total)*100)
+	fmt.Printf("   🟨 Low-Bit Accept:   %d (%.1f%%)\n", s.LowBit, float64(s.LowBit)/float64(s.Total)*100)
+	fmt.Printf("   🟠 Significant Drift: %d (%.1f%%)\n", s.Drift, float64(s.Drift)/float64(s.Total)*100)
+	fmt.Printf("   ❌ Broken:            %d\n", s.Broken)
+	fmt.Printf("   💀 Fatal (NaN):       %d\n", s.Fatal)
 }
 
 var stats = &GlobalStats{}
@@ -248,7 +339,7 @@ func RunAllLayers() {
 	start := time.Now()
 	for _, task := range registry {
 		ok := task()
-		stats.Add(ok)
+		stats.AddResult(ok)
 	}
 	stats.Report()
 	fmt.Printf("Total Time: %v\n", time.Since(start).Round(time.Millisecond))

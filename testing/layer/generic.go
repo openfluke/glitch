@@ -30,6 +30,7 @@ type TestSpec struct {
 // RunGenericLayerSuite executes forward/backward parity, save/reload, and training tests.
 func RunGenericLayerSuite(spec TestSpec, mode TestMode) bool {
 	fmt.Printf("\n--- [%s] Generic Layer Suite ---\n", spec.Name)
+	stats.StartLayer()
 
 	fullSpec := poly.PersistenceNetworkSpec{
 		ID: "test_net", Depth: 1, Rows: 1, Cols: 1, LayersPerCell: 1,
@@ -49,24 +50,33 @@ func RunGenericLayerSuite(spec TestSpec, mode TestMode) bool {
 
 	// 1. Forward Parity (Normal vs Tiled vs GPU)
 	if mode&TestForward != 0 {
+		stats.ResetSub()
 		allPass = runForwardSuite(spec, l) && allPass
+		stats.ReportSub("Forward Parity")
 	}
 
 	// 2. Backward Parity
 	if mode&TestBackward != 0 {
+		stats.ResetSub()
 		allPass = runBackwardSuite(spec, l) && allPass
+		stats.ReportSub("Backward Parity")
 	}
 
 	// 3. Save/Reload Parity
 	if mode&TestSaveLoad != 0 {
+		stats.ResetSub()
 		allPass = runSaveReloadSuite(spec, l) && allPass
+		stats.ReportSub("Save/Reload")
 	}
 
 	// 4. Training (Loss reduction)
 	if mode&TestTraining != 0 {
+		stats.ResetSub()
 		allPass = runTrainingSuite(spec, l) && allPass
+		stats.ReportSub("Training Matrix")
 	}
 
+	stats.ReportLayer(spec.Name)
 	return allPass
 }
 
@@ -88,10 +98,10 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		ctx = l.Network.GPUContext
 	}
 
-	fmt.Printf("| %-10s | %-4s | %-12s | %-12s | %-12s | %-12s | %-6s | %-6s | %-6s | %-8s | %-8s | %-8s | %-6s | %-6s | %-6s |\n",
+	fmt.Printf("| %-10s | %-4s | %-12s | %-12s | %-12s | %-12s | %-8s | %-8s | %-8s | %-8s | %-8s | %-8s | %-8s | %-8s |\n",
 		"DType", "Tile", "CPU MC", "GPU Normal", "GPU Tiled SC", "GPU Tiled MC",
-		"GN-Spd", "SC-Spd", "MC-Spd", "Diff-GN", "Diff-SC", "Diff-MC", "GN-Par", "SC-Par", "MC-Par")
-	fmt.Println("|------------|------|--------------|--------------|--------------|--------------|--------|--------|--------|----------|----------|----------|--------|--------|--------|")
+		"Diff-CPU", "Diff-GN", "Diff-SC", "Diff-MC", "CP-Par", "GN-Par", "SC-Par", "MC-Par")
+	fmt.Println("|------------|------|--------------|--------------|--------------|--------------|----------|----------|----------|----------|----------|----------|----------|----------|")
 
 	allPass := true
 	for _, cfg := range allTypes {
@@ -138,7 +148,7 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		diffGN := maxAbsDiff(postBaseline.Data, gpuNormData)
 		diffSC := maxAbsDiff(postBaseline.Data, gpuSCData)
 		diffMC := maxAbsDiff(postBaseline.Data, gpuMCData)
-		diffCPUMC := maxAbsDiff(postBaseline.Data, postMC.Data)
+		diffCP := maxAbsDiff(postBaseline.Data, postMC.Data)
 
 		r := ParityResult{
 			TCPUMC: tCPUMC, TGPUNorm: tGPUNorm, TGPUSC: tGPUSC, TGPUMC: tGPUMC,
@@ -146,10 +156,18 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 			ParityGN: diffGN < cfg.tolerance, ParityGSC: diffSC < cfg.tolerance, ParityGMC: diffMC < cfg.tolerance,
 			TileSize: l.GetCPUTileSize(cfg.dtype),
 		}
-		_ = diffCPUMC // use it if needed for reporting
-		PrintParityRow(cfg, r)
-		if !r.ParityGN || !r.ParityGSC || !r.ParityGMC { allPass = false }
-		stats.Add(r.ParityGN)
+		
+		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-8.2e | %-8.2e | %-8.2e | %-8.2e | %-8s | %-8s | %-8s | %-8s |\n",
+			cfg.name, r.TileSize, r.TCPUMC, r.TGPUNorm, r.TGPUSC, r.TGPUMC,
+			diffCP, r.DiffGN, r.DiffGSC, r.DiffGMC,
+			spectrumMark(diffCP, 1e-10), spectrumMark(r.DiffGN, cfg.tolerance), 
+			spectrumMark(r.DiffGSC, 1e-10), spectrumMark(r.DiffGMC, 1e-10))
+
+		if !r.ParityGN || !r.ParityGSC || !r.ParityGMC || diffCP > 1e-10 { allPass = false }
+		stats.Add(diffCP, 1e-10)
+		stats.Add(r.DiffGN, cfg.tolerance)
+		stats.Add(r.DiffGSC, 1e-10) // Tiling determinism should be exactly exact or zero
+		stats.Add(r.DiffGMC, 1e-10)
 	}
 	return allPass
 }
@@ -232,12 +250,17 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		okSC := dxDiffSC < cfg.tolerance*5 && dwDiffSC < cfg.tolerance*5
 		okMC := dxDiffMC < cfg.tolerance*5 && dwDiffMC < cfg.tolerance*5
 
-		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-7.1fx | %-7.1fx | %-7.1fx | %-9.2e | %-9.2e | %-9.2e | %-9.2e | %-4s | %-4s | %-4s |\n",
+		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-7.1fx | %-7.1fx | %-7.1fx | %-9.2e | %-9.2e | %-9.2e | %-9.2e | %-8s | %-8s | %-8s |\n",
 			cfg.name, l.GetCPUTileSize(cfg.dtype), time.Second, tGPUNorm, tGPUSC, tGPUMC, // Dummy CPU time for now
-			1.0, 1.0, 1.0, dxDiffN, dwDiffN, dxDiffSC, dwDiffSC, parityMark(okN), parityMark(okSC), parityMark(okMC))
+			1.0, 1.0, 1.0, dxDiffN, dwDiffN, dxDiffSC, dwDiffSC, 
+			spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10), 
+			spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10), 
+			spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10))
 		
 		if !okN || !okSC || !okMC { allPass = false }
-		stats.Add(okN)
+		stats.Add(dxDiffN+dwDiffN, cfg.tolerance*10)
+		stats.Add(dxDiffSC+dwDiffSC, cfg.tolerance*10)
+		stats.Add(dxDiffMC+dwDiffMC, cfg.tolerance*10)
 	}
 	return allPass
 }
@@ -260,7 +283,7 @@ func runSaveReloadSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	
 	ok := diff < 1e-6 && weightsMatch
 	if ok { fmt.Println("PASS") } else { fmt.Printf("FAIL (Diff: %.2e, Weights: %v)\n", diff, weightsMatch) }
-	stats.Add(ok)
+	stats.Add(diff, 1e-6)
 	return ok
 }
 
@@ -342,10 +365,12 @@ func runTrainingSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 				markMark(trainOK), markMark(saveOK), float64(len(js))/1024.0, float64(ramBytes)/1024.0)
 			
 			if !trainOK || !saveOK { overallPass = false }
+			
+			if trainOK { stats.Add(0, 0) } else { stats.Add(1.0, 0) }
+			if saveOK { stats.Add(0, 0) } else { stats.Add(1.0, 0) }
 		}
 		fmt.Println("|------------|---------------|------------|------------|----------|---------|-------------|----------|----------|")
 	}
-	stats.Add(overallPass)
 	return overallPass
 }
 

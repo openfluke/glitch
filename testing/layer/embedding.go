@@ -8,8 +8,8 @@ var embeddingSpec = TestSpec{
 	Name: "Embedding",
 	Layer: poly.PersistenceLayerSpec{
 		Type:         "Embedding",
-		InputHeight:  100, // Vocab size
-		OutputHeight: 64,  // Embedding dim
+		VocabSize:    100,
+		EmbeddingDim: 64,
 	},
 	InputShape: []int{8, 1}, // Batch of 8 indices
 }
