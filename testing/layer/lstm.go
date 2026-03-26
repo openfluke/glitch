@@ -21,5 +21,7 @@ func init() {
 	})
 }
 
-func RunLSTML1Caching() { RunGenericLayerSuite(lstmSpec, TestForward) }
-func RunLSTMTraining()  { RunGenericLayerSuite(lstmSpec, TestTraining|TestSaveLoad) }
+func RunLSTML1Caching()   { RunGenericLayerSuite(lstmSpec, TestForward) }
+func RunLSTMTraining()    { RunGenericLayerSuite(lstmSpec, TestTraining|TestSaveLoad) }
+func RunLSTMGPUForward()  { RunGenericLayerSuite(lstmSpec, TestForward) }
+func RunLSTMGPUBackward() { RunGenericLayerSuite(lstmSpec, TestBackward) }

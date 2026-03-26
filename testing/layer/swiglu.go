@@ -20,6 +20,7 @@ func init() {
 	})
 }
 
-func RunSwiGLUL1Caching()  { RunGenericLayerSuite(swigluSpec, TestForward) }
-func RunSwiGLUTraining()   { RunGenericLayerSuite(swigluSpec, TestTraining|TestSaveLoad) }
-func RunSwiGLUGPUForward() { RunGenericLayerSuite(swigluSpec, TestForward) }
+func RunSwiGLUL1Caching()   { RunGenericLayerSuite(swigluSpec, TestForward) }
+func RunSwiGLUTraining()    { RunGenericLayerSuite(swigluSpec, TestTraining|TestSaveLoad) }
+func RunSwiGLUGPUForward()  { RunGenericLayerSuite(swigluSpec, TestForward) }
+func RunSwiGLUGPUBackward() { RunGenericLayerSuite(swigluSpec, TestBackward) }

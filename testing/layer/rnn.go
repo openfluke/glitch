@@ -22,5 +22,7 @@ func init() {
 	})
 }
 
-func RunRNNL1Caching() { RunGenericLayerSuite(rnnSpec, TestForward) }
-func RunRNNTraining()  { RunGenericLayerSuite(rnnSpec, TestTraining|TestSaveLoad) }
+func RunRNNL1Caching()   { RunGenericLayerSuite(rnnSpec, TestForward) }
+func RunRNNTraining()    { RunGenericLayerSuite(rnnSpec, TestTraining|TestSaveLoad) }
+func RunRNNGPUForward()  { RunGenericLayerSuite(rnnSpec, TestForward) }
+func RunRNNGPUBackward() { RunGenericLayerSuite(rnnSpec, TestBackward) }

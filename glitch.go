@@ -118,37 +118,51 @@ func runLayerTests(reader *bufio.Reader, layerName string, testInput string) {
 	case "MHA":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunMHAL1Caching},
+			{"Training (6 modes x 21 types)", layer.RunMHATraining},
+			{"GPU Forward Parity", layer.RunMHAForward},
+			{"GPU Backward Parity", layer.RunMHABackward},
 		}
 	case "Dense":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunDenseL1Caching},
-			{"Training (6 modes × 21 types)", layer.RunDenseTraining},
+			{"Training (6 modes x 21 types)", layer.RunDenseTraining},
 			{"GPU Forward Parity", layer.RunDenseGPUForward},
 			{"GPU Backward Parity", layer.RunDenseGPUBackward},
 		}
 	case "SwiGLU":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunSwiGLUL1Caching},
-			{"Training (6 modes × 21 types)", layer.RunSwiGLUTraining},
+			{"Training (6 modes x 21 types)", layer.RunSwiGLUTraining},
 			{"GPU Forward Parity", layer.RunSwiGLUGPUForward},
+			{"GPU Backward Parity", layer.RunSwiGLUGPUBackward},
 		}
 	case "RNN":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunRNNL1Caching},
-			{"Training (6 modes × 21 types)", layer.RunRNNTraining},
+			{"Training (6 modes x 21 types)", layer.RunRNNTraining},
+			{"GPU Forward Parity", layer.RunRNNGPUForward},
+			{"GPU Backward Parity", layer.RunRNNGPUBackward},
 		}
 	case "LSTM":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunLSTML1Caching},
-			{"Training (6 modes × 21 types)", layer.RunLSTMTraining},
+			{"Training (6 modes x 21 types)", layer.RunLSTMTraining},
+			{"GPU Forward Parity", layer.RunLSTMGPUForward},
+			{"GPU Backward Parity", layer.RunLSTMGPUBackward},
 		}
 	case "Embedding":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunEmbeddingL1Caching},
+			{"Training (6 modes x 21 types)", layer.RunEmbeddingTraining},
+			{"GPU Forward Parity", layer.RunEmbeddingGPUForward},
+			{"GPU Backward Parity", layer.RunEmbeddingGPUBackward},
 		}
 	case "Residual":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunResidualL1Caching},
+			{"Training (6 modes x 21 types)", layer.RunResidualTraining},
+			{"GPU Forward Parity", layer.RunResidualGPUForward},
+			{"GPU Backward Parity", layer.RunResidualGPUBackward},
 		}
 	default:
 		fmt.Printf("No tests registered for layer: %s\n", layerName)
@@ -534,13 +548,13 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 	// 4. Test Matrix setup
 	devices := []string{"cpu", "gpu"}
 	testDTypes := []poly.DType{
-		poly.DTypeFloat32, 
-		poly.DTypeFloat16, 
+		poly.DTypeFloat32,
+		poly.DTypeFloat16,
 		poly.DTypeBFloat16,
 		poly.DTypeInt8,
 		poly.DTypeInt4,
 	}
-	
+
 	tilingModes := []struct {
 		name  string
 		tiled bool
@@ -559,7 +573,9 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 	fmt.Println("|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 13) + "|" + strings.Repeat("-", 6) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 11) + "|" + strings.Repeat("-", 10) + "|" + strings.Repeat("-", 14) + "|")
 
 	for _, dev := range devices {
-		if dev == "cpu" && skipCPU { continue }
+		if dev == "cpu" && skipCPU {
+			continue
+		}
 		useGPU := (dev == "gpu")
 		for _, dt := range testDTypes {
 			for _, tm := range tilingModes {
@@ -582,10 +598,34 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 
 				for i := 0; i < numLayers; i++ {
 					base := i * 4
-					l0 := &net.Layers[base]; l0.Network = net; l0.Type = poly.LayerRMSNorm; l0.InputHeight = hiddenSize; l0.OutputHeight = hiddenSize; l0.WeightStore = poly.NewWeightStore(hiddenSize)
-					l1 := &net.Layers[base+1]; l1.Network = net; l1.Type = poly.LayerMultiHeadAttention; l1.DModel = hiddenSize; l1.NumHeads = numHeads; l1.NumKVHeads = numKVHeads; l1.HeadDim = headDim; l1.RoPEFreqBase = float64(ropeFreqBase); l1.MaxSeqLen = 2048; l1.WeightStore = poly.NewWeightStore(mhaSize)
-					l2 := &net.Layers[base+2]; l2.Network = net; l2.Type = poly.LayerRMSNorm; l2.InputHeight = hiddenSize; l2.OutputHeight = hiddenSize; l2.WeightStore = poly.NewWeightStore(hiddenSize)
-					l3 := &net.Layers[base+3]; l3.Network = net; l3.Type = poly.LayerSwiGLU; l3.InputHeight = hiddenSize; l3.OutputHeight = intermediateSize; l3.WeightStore = poly.NewWeightStore(mlpSize)
+					l0 := &net.Layers[base]
+					l0.Network = net
+					l0.Type = poly.LayerRMSNorm
+					l0.InputHeight = hiddenSize
+					l0.OutputHeight = hiddenSize
+					l0.WeightStore = poly.NewWeightStore(hiddenSize)
+					l1 := &net.Layers[base+1]
+					l1.Network = net
+					l1.Type = poly.LayerMultiHeadAttention
+					l1.DModel = hiddenSize
+					l1.NumHeads = numHeads
+					l1.NumKVHeads = numKVHeads
+					l1.HeadDim = headDim
+					l1.RoPEFreqBase = float64(ropeFreqBase)
+					l1.MaxSeqLen = 2048
+					l1.WeightStore = poly.NewWeightStore(mhaSize)
+					l2 := &net.Layers[base+2]
+					l2.Network = net
+					l2.Type = poly.LayerRMSNorm
+					l2.InputHeight = hiddenSize
+					l2.OutputHeight = hiddenSize
+					l2.WeightStore = poly.NewWeightStore(hiddenSize)
+					l3 := &net.Layers[base+3]
+					l3.Network = net
+					l3.Type = poly.LayerSwiGLU
+					l3.InputHeight = hiddenSize
+					l3.OutputHeight = intermediateSize
+					l3.WeightStore = poly.NewWeightStore(mlpSize)
 
 					// Set DType and Tiling
 					for j := 0; j < 4; j++ {
@@ -603,7 +643,9 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 
 				tr := poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
 				if useGPU {
-					for i := range net.Layers { net.Layers[i].SyncToGPU() }
+					for i := range net.Layers {
+						net.Layers[i].SyncToGPU()
+					}
 					tr.SyncToGPU()
 				} else {
 					net.SyncToCPU()
@@ -617,17 +659,19 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 
 				if len(tokensIn) == 0 {
 					fmt.Printf("| %-10v | %-12s | %-6s | %-12s | %-12s | %-8s | %-10s | %-12s |\n", dt, tm.name, dev, "TOK ERR", "-", "-", "-", "-")
-					if useGPU && net != nil { net.DestroyWGPU() }
+					if useGPU && net != nil {
+						net.DestroyWGPU()
+					}
 					continue
 				}
 
 				maxGen := 50
 				opts := poly.GenOptions{
-					MaxTokens:         maxGen,
-					Temperature:       0.0, // deterministic
-					TopK:              1,
-					Deterministic:     true,
-					Silent:            true,
+					MaxTokens:     maxGen,
+					Temperature:   0.0, // deterministic
+					TopK:          1,
+					Deterministic: true,
+					Silent:        true,
 				}
 
 				encode := func(text string) []uint32 { return tk.Encode(text, false) }
@@ -638,7 +682,9 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 
 				dispToks := tokStrRaw
 				dispToks = strings.ReplaceAll(dispToks, "\n", " ")
-				if len(dispToks) > 12 { dispToks = dispToks[:9] + "..." }
+				if len(dispToks) > 12 {
+					dispToks = dispToks[:9] + "..."
+				}
 
 				vramStr := fmt.Sprintf("%.1f", metrics.VRAMUsageMB)
 				if !useGPU {

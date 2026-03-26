@@ -22,3 +22,6 @@ func init() {
 }
 
 func RunMHAL1Caching() { RunGenericLayerSuite(mhaSpec, TestForward) }
+func RunMHAForward()   { RunGenericLayerSuite(mhaSpec, TestForward) }
+func RunMHABackward()  { RunGenericLayerSuite(mhaSpec, TestBackward) }
+func RunMHATraining()  { RunGenericLayerSuite(mhaSpec, TestTraining|TestSaveLoad) }

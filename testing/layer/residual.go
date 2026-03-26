@@ -20,4 +20,7 @@ func init() {
 	})
 }
 
-func RunResidualL1Caching() { RunGenericLayerSuite(residualSpec, TestForward) }
+func RunResidualL1Caching()   { RunGenericLayerSuite(residualSpec, TestForward) }
+func RunResidualTraining()    { RunGenericLayerSuite(residualSpec, TestTraining|TestSaveLoad) }
+func RunResidualGPUForward()  { RunGenericLayerSuite(residualSpec, TestForward) }
+func RunResidualGPUBackward() { RunGenericLayerSuite(residualSpec, TestBackward) }

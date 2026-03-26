@@ -22,4 +22,7 @@ func init() {
 	})
 }
 
-func RunEmbeddingL1Caching() { RunGenericLayerSuite(embeddingSpec, TestForward) }
+func RunEmbeddingL1Caching()   { RunGenericLayerSuite(embeddingSpec, TestForward) }
+func RunEmbeddingTraining()    { RunGenericLayerSuite(embeddingSpec, TestTraining|TestSaveLoad) }
+func RunEmbeddingGPUForward()  { RunGenericLayerSuite(embeddingSpec, TestForward) }
+func RunEmbeddingGPUBackward() { RunGenericLayerSuite(embeddingSpec, TestBackward) }
