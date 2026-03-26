@@ -176,6 +176,7 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		stats.AddSpectrum(spectrumMark(diffGN, cfg.tolerance, gpuNormData, postCPU.Data))
 		stats.AddSpectrum(spectrumMark(diffGSC, 1e-10, gpuSCData, postCPU.Data))
 		stats.AddSpectrum(spectrumMark(diffGMC, 1e-10, gpuMCData, postCPU.Data))
+		stats.AddPerf(spec.Name, cfg.name, "Forward", tCPUNorm, tGPUMC)
 	}
 	return allPass
 }
@@ -307,6 +308,7 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		stats.AddSpectrum(mN)
 		stats.AddSpectrum(mSC)
 		stats.AddSpectrum(mMC)
+		stats.AddPerf(spec.Name, cfg.name, "Backward", tCPUMC, tGPUMC)
 	}
 	return allPass
 }

@@ -302,6 +302,15 @@ func (s Spectrum) String() string {
 	}
 }
 
+type PerfRecord struct {
+	LayerName string
+	DType     string
+	Action    string // "Forward" or "Backward"
+	Slowest   time.Duration
+	Fastest   time.Duration
+	Speedup   float64
+}
+
 type GlobalStats struct {
 	Total      int
 	BitExact   int
@@ -331,6 +340,9 @@ type GlobalStats struct {
 	SHeavyDrift int
 	SBroken     int
 	SFatal      int
+
+	// Performance Tracking
+	PerfStore []PerfRecord
 }
 
 func (s *GlobalStats) AddSpectrum(sp Spectrum) {
@@ -389,6 +401,21 @@ func (s *GlobalStats) AddResult(ok bool) {
 	}
 }
 
+func (s *GlobalStats) AddPerf(layer, dtype, action string, slow, fast time.Duration) {
+	speedup := 1.0
+	if fast > 0 {
+		speedup = float64(slow) / float64(fast)
+	}
+	s.PerfStore = append(s.PerfStore, PerfRecord{
+		LayerName: layer,
+		DType:     dtype,
+		Action:    action,
+		Slowest:   slow,
+		Fastest:   fast,
+		Speedup:   speedup,
+	})
+}
+
 func (s *GlobalStats) StartLayer() {
 	s.LTotal = 0; s.LBitExact = 0; s.LIndustry = 0; s.LLowBit = 0; s.LDrift = 0; s.LHeavyDrift = 0; s.LBroken = 0; s.LFatal = 0
 }
@@ -419,6 +446,27 @@ func (s *GlobalStats) Report() {
 	fmt.Printf("   🟤 Heavy Drift:       %d (%.1f%%)\n", s.HeavyDrift, float64(s.HeavyDrift)/float64(s.Total)*100)
 	fmt.Printf("   ❌ Broken:            %d\n", s.Broken)
 	fmt.Printf("   💀 Fatal (NaN):       %d\n", s.Fatal)
+
+	if len(s.PerfStore) > 0 {
+		fmt.Printf("\n🚀 MAXIMUM PERFORMANCE REPORT (SLOWEST BASELINE vs FASTEST ACCELERATED)\n")
+		fmt.Printf("| %-10s | %-12s | %-10s | %-12s | %-12s | %-8s |\n", "Layer", "Action", "DType", "Slowest", "Fastest", "Gain")
+		fmt.Println("|------------|--------------|------------|--------------|--------------|----------|")
+		
+		maxGain := 0.0
+		var best PerfRecord
+
+		for _, p := range s.PerfStore {
+			fmt.Printf("| %-10s | %-12s | %-10s | %-12v | %-12v | %-8.1fx |\n", 
+				p.LayerName, p.Action, p.DType, p.Slowest, p.Fastest, p.Speedup)
+			if p.Speedup > maxGain {
+				maxGain = p.Speedup
+				best = p
+			}
+		}
+		
+		fmt.Println("|------------|--------------|------------|--------------|--------------|----------|")
+		fmt.Printf("🔥 PEAK PERFORMANCE GAP: %.1fx (%s %s on %s)\n", best.Speedup, best.LayerName, best.Action, best.DType)
+	}
 }
 
 var stats = &GlobalStats{}
