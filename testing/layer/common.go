@@ -122,6 +122,7 @@ func rawF32(ws *poly.WeightStore, dtype poly.DType) []float32 {
 }
 
 func zeroF32Buf(ctx *poly.WGPUContext, size int, label string) (*wgpu.Buffer, error) {
+	if size <= 0 { size = 1 }
 	zeros := make([]float32, size)
 	return ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    label,

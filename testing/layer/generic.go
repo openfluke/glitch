@@ -106,9 +106,11 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	allPass := true
 	for _, cfg := range allTypes {
 		l.DType = cfg.dtype
-		l.WeightStore.Morph(cfg.dtype)
-		l.WeightStore.Scale = cfg.scale
-		l.SyncToCPU()
+		if l.WeightStore != nil {
+			l.WeightStore.Morph(cfg.dtype)
+			l.WeightStore.Scale = cfg.scale
+			l.SyncToCPU()
+		}
 		
 		// 1. CPU MC benchmark
 		l.EnableMultiCoreTiling = true
@@ -184,9 +186,6 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	
 	// CPU Baseline (Multi-Core)
 	l.EnableMultiCoreTiling = true
-	_, layerGradients, _ := poly.BackwardPolymorphic(l.Network, gradOut, []*poly.Tensor[float32]{input}, []*poly.Tensor[float32]{pre})
-	cpuDX := layerGradients[0][0]
-	cpuDW := layerGradients[0][1]
 
 	ctx := l.Network.GPUContext
 	if ctx == nil {
@@ -202,20 +201,30 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	allPass := true
 	for _, cfg := range allTypes {
 		l.DType = cfg.dtype
-		l.WeightStore.Morph(cfg.dtype)
-		l.WeightStore.Scale = cfg.scale
+		if l.WeightStore != nil {
+			l.WeightStore.Morph(cfg.dtype)
+			l.WeightStore.Scale = cfg.scale
+		}
 		l.Network.SyncToGPU()
+		
+		// We compute CPU baseline inside the loop to match morphed precision
+		l.EnableMultiCoreTiling = true
+		cpuDX, cpuDW := poly.DispatchLayerBackward(l, gradOut, input, nil, pre)
 		
 		inBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{Label: "BwdIn", Contents: wgpu.ToBytes(input.Data), Usage: wgpu.BufferUsageStorage})
 		goBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{Label: "BwdGO", Contents: wgpu.ToBytes(gradOut.Data), Usage: wgpu.BufferUsageStorage})
 		preBuf, _ := ctx.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{Label: "BwdPre", Contents: wgpu.ToBytes(pre.Data), Usage: wgpu.BufferUsageStorage})
 		
 		dxBufN, _ := zeroF32Buf(ctx, len(cpuDX.Data), "dxN")
-		dwBufN, _ := zeroF32Buf(ctx, len(cpuDW.Data), "dwN")
+		dwSize := len(cpuDW.Data)
+		if l.Type == poly.LayerResidual {
+			dwSize = len(cpuDX.Data)
+		}
+		dwBufN, _ := zeroF32Buf(ctx, dwSize, "dwN")
 		dxBufSC, _ := zeroF32Buf(ctx, len(cpuDX.Data), "dxSC")
-		dwBufSC, _ := zeroF32Buf(ctx, len(cpuDW.Data), "dwSC")
+		dwBufSC, _ := zeroF32Buf(ctx, dwSize, "dwSC")
 		dxBufMC, _ := zeroF32Buf(ctx, len(cpuDX.Data), "dxMC")
-		dwBufMC, _ := zeroF32Buf(ctx, len(cpuDW.Data), "dwMC")
+		dwBufMC, _ := zeroF32Buf(ctx, dwSize, "dwMC")
 		defer inBuf.Destroy(); defer goBuf.Destroy(); defer preBuf.Destroy()
 		defer dxBufN.Destroy(); defer dwBufN.Destroy(); defer dxBufSC.Destroy(); defer dwBufSC.Destroy(); defer dxBufMC.Destroy(); defer dwBufMC.Destroy()
 
@@ -278,7 +287,12 @@ func runSaveReloadSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	l2 := net2.GetLayer(0, 0, 0, 0)
 	_, post2 := poly.DispatchLayer(l2, input, nil)
 	
-	weightsMatch := maxAbsDiff(l.WeightStore.Master, l2.WeightStore.Master) < 1e-6
+	weightsMatch := true
+	if l.WeightStore != nil && l2.WeightStore != nil {
+		weightsMatch = maxAbsDiff(l.WeightStore.Master, l2.WeightStore.Master) < 1e-6
+	} else if (l.WeightStore == nil) != (l2.WeightStore == nil) {
+		weightsMatch = false
+	}
 	diff := maxAbsDiff(post1.Data, post2.Data)
 	
 	ok := diff < 1e-6 && weightsMatch
@@ -290,23 +304,8 @@ func runSaveReloadSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 func runTrainingSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	fmt.Printf("\n=== %s Training — All Modes × All Numerical Types ===\n\n", spec.Name)
 	input := genInput(spec.InputShape)
-	// Target shape should match filters/output dims
-	batchSize := spec.InputShape[0]
-	var targetShape []int
-	switch l.Type {
-	case poly.LayerCNN1:
-		targetShape = []int{batchSize, l.Filters, l.OutputHeight}
-	case poly.LayerCNN2:
-		targetShape = []int{batchSize, l.Filters, l.OutputHeight, l.OutputWidth}
-	case poly.LayerCNN3:
-		targetShape = []int{batchSize, l.Filters, l.OutputDepth, l.OutputHeight, l.OutputWidth}
-	case poly.LayerDense:
-		targetShape = []int{batchSize, l.OutputHeight}
-	default:
-		targetShape = []int{batchSize, l.OutputHeight} // fallback
-	}
-	
-	target := genInput(targetShape)
+	_, postBaseline := poly.DispatchLayer(l, input, nil)
+	target := genInput(postBaseline.Shape)
 	
 	batch := poly.TrainingBatch[float32]{Input: input, Target: target}
 	allModes := []poly.TrainingMode{
@@ -322,12 +321,17 @@ func runTrainingSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	for _, cfg := range allTypes {
 		for _, mode := range allModes {
 			l.DType = cfg.dtype
-			l.WeightStore.Morph(cfg.dtype)
-			l.WeightStore.Scale = cfg.scale
-			l.SyncToCPU()
+			if l.WeightStore != nil {
+				l.WeightStore.Morph(cfg.dtype)
+				l.WeightStore.Scale = cfg.scale
+				l.SyncToCPU()
+			}
 			if mode.IsGPU() && l.Network.GPUContext == nil { continue }
 
-			w0 := make([]float32, len(l.WeightStore.Master)); copy(w0, l.WeightStore.Master)
+			var w0 []float32
+			if l.WeightStore != nil {
+				w0 = make([]float32, len(l.WeightStore.Master)); copy(w0, l.WeightStore.Master)
+			}
 			
 			tcfg := poly.DefaultTrainingConfig()
 			tcfg.Epochs = 5; tcfg.Mode = mode; tcfg.Verbose = false; tcfg.LearningRate = 0.01
@@ -341,28 +345,36 @@ func runTrainingSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 				overallPass = false; continue
 			}
 
-			if mode.IsGPU() { poly.SyncWeightsFromGPU(l.Network) }
-			wt := l.WeightStore.Master
-			trainOK := maxAbsDiff(wt, w0) > 0
+			var trainOK, saveOK bool
+			if l.WeightStore != nil {
+				if mode.IsGPU() { poly.SyncWeightsFromGPU(l.Network) }
+				wt := l.WeightStore.Master
+				trainOK = maxAbsDiff(wt, w0) > 0
 
-			// Save/Reload
-			js, _ := poly.SerializeNetwork(l.Network)
-			net2, _ := poly.DeserializeNetwork(js)
-			l2 := net2.GetLayer(0, 0, 0, 0)
-			wr := l2.WeightStore.Master
-			
-			expected := wt
-			if cfg.dtype != poly.DTypeFloat32 {
-				expected = make([]float32, len(wt))
-				for i, v := range wt { expected[i] = poly.SimulatePrecision(v, cfg.dtype, l.WeightStore.Scale) }
+				// Save/Reload
+				js, _ := poly.SerializeNetwork(l.Network)
+				net2, _ := poly.DeserializeNetwork(js)
+				l2 := net2.GetLayer(0, 0, 0, 0)
+				wr := l2.WeightStore.Master
+				
+				expected := wt
+				if cfg.dtype != poly.DTypeFloat32 {
+					expected = make([]float32, len(wt))
+					for i, v := range wt { expected[i] = poly.SimulatePrecision(v, cfg.dtype, l.WeightStore.Scale) }
+				}
+				saveOK = maxAbsDiff(wr, expected) < 1e-4
+
+				ramBytes := int64(len(wt)*4) + int64(math.Ceil(float64(len(wt)*poly.DTypeBits(cfg.dtype))/8.0))
+				fmt.Printf("| %-10s | %-13s | %-10.4e | %-10.4e | %-8v | %-7s | %-11s | %-8.1fKB | %-8.1fKB |\n",
+					cfg.name, mode.String(), res.LossHistory[0], res.FinalLoss, dur.Round(time.Millisecond),
+					markMark(trainOK), markMark(saveOK), float64(len(js))/1024.0, float64(ramBytes)/1024.0)
+			} else {
+				// Weightless layers always "pass" weight tests since they change nothing
+				trainOK, saveOK = true, true
+				fmt.Printf("| %-10s | %-13s | %-10.4e | %-10.4e | %-8v | %-7v | %-11v | %-8s | %-8s |\n",
+					cfg.name, mode.String(), res.LossHistory[0], res.FinalLoss, dur.Round(time.Millisecond),
+					"N/A", "N/A", "0KB", "0KB")
 			}
-			saveOK := maxAbsDiff(wr, expected) < 1e-4
-
-			ramBytes := int64(len(wt)*4) + int64(math.Ceil(float64(len(wt)*poly.DTypeBits(cfg.dtype))/8.0))
-
-			fmt.Printf("| %-10s | %-13s | %-10.4e | %-10.4e | %-8v | %-7s | %-11s | %-8.1fKB | %-8.1fKB |\n",
-				cfg.name, mode.String(), res.LossHistory[0], res.FinalLoss, dur.Round(time.Millisecond),
-				markMark(trainOK), markMark(saveOK), float64(len(js))/1024.0, float64(ramBytes)/1024.0)
 			
 			if !trainOK || !saveOK { overallPass = false }
 			

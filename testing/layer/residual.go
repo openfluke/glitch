@@ -7,7 +7,9 @@ import (
 var residualSpec = TestSpec{
 	Name: "Residual",
 	Layer: poly.PersistenceLayerSpec{
-		Type: "Residual",
+		Type:         "Residual",
+		InputHeight:  128,
+		OutputHeight: 128,
 	},
 	InputShape: []int{8, 128},
 }

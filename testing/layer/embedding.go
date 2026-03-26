@@ -10,6 +10,8 @@ var embeddingSpec = TestSpec{
 		Type:         "Embedding",
 		VocabSize:    100,
 		EmbeddingDim: 64,
+		InputHeight:  1,
+		SeqLength:    1,
 	},
 	InputShape: []int{8, 1}, // Batch of 8 indices
 }
