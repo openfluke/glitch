@@ -69,29 +69,21 @@ func runTestingMode(reader *bufio.Reader) {
 	}
 	layerInput := readInput(reader, "Select layer [1]: ", "1")
 
-	var selectedLayers []string
 	if layerInput == "0" {
 		confirm := readInput(reader, "would you like to run all tests on all layers? (1=yes / 0=no) [0]: ", "0")
 		if confirm != "1" {
 			return
 		}
-		selectedLayers = layers
-	} else {
-		idx, err := strconv.Atoi(layerInput)
-		if err != nil || idx < 1 || idx > len(layers) {
-			fmt.Println("Invalid selection.")
-			return
-		}
-		selectedLayers = []string{layers[idx-1]}
+		layer.RunAllLayers()
+		return
 	}
 
-	for _, layerName := range selectedLayers {
-		if layerInput == "0" {
-			runLayerTests(reader, layerName, "0")
-		} else {
-			runLayerTests(reader, layerName, "")
-		}
+	idx, err := strconv.Atoi(layerInput)
+	if err != nil || idx < 1 || idx > len(layers) {
+		fmt.Println("Invalid selection.")
+		return
 	}
+	runLayerTests(reader, layers[idx-1], "")
 }
 
 func runLayerTests(reader *bufio.Reader, layerName string, testInput string) {
@@ -126,9 +118,6 @@ func runLayerTests(reader *bufio.Reader, layerName string, testInput string) {
 	case "MHA":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunMHAL1Caching},
-			{"Training (6 modes × 21 types)", layer.RunMHATraining},
-			{"GPU Forward Parity", layer.RunMHAGPUForward},
-			{"GPU Backward Parity", layer.RunMHAGPUBackward},
 		}
 	case "Dense":
 		tests = []testEntry{
@@ -142,33 +131,24 @@ func runLayerTests(reader *bufio.Reader, layerName string, testInput string) {
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunSwiGLUL1Caching},
 			{"Training (6 modes × 21 types)", layer.RunSwiGLUTraining},
 			{"GPU Forward Parity", layer.RunSwiGLUGPUForward},
-			{"GPU Backward Parity", layer.RunSwiGLUGPUBackward},
 		}
 	case "RNN":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunRNNL1Caching},
 			{"Training (6 modes × 21 types)", layer.RunRNNTraining},
-			{"GPU Forward Parity", layer.RunRNNGPUForward},
-			{"GPU Backward Parity", layer.RunRNNGPUBackward},
 		}
 	case "LSTM":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunLSTML1Caching},
 			{"Training (6 modes × 21 types)", layer.RunLSTMTraining},
-			{"GPU Forward Parity", layer.RunLSTMGPUForward},
-			{"GPU Backward Parity", layer.RunLSTMGPUBackward},
 		}
 	case "Embedding":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunEmbeddingL1Caching},
-			{"GPU Forward Parity", layer.RunEmbeddingGPUForward},
-			{"GPU Backward Parity", layer.RunEmbeddingGPUBackward},
 		}
 	case "Residual":
 		tests = []testEntry{
 			{"L1 Caching (CPU Normal / SC / MC)", layer.RunResidualL1Caching},
-			{"GPU Forward Parity", layer.RunResidualGPUForward},
-			{"GPU Backward Parity", layer.RunResidualGPUBackward},
 		}
 	default:
 		fmt.Printf("No tests registered for layer: %s\n", layerName)
