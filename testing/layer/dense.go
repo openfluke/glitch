@@ -52,6 +52,7 @@ func RunDenseL1Caching() {
 			OutputHeight: outputSize,
 			DType:        cfg.dtype,
 			WeightStore:  ws,
+			Activation:   poly.ActivationLinear,
 		}
 		input := poly.NewTensor[float32](batchSize, inputSize)
 		for i := range input.Data {
@@ -408,6 +409,7 @@ func RunDenseGPUForward() {
 			WeightStore:  ws,
 			UseTiling:    true,
 			TileSize:     0,
+			Activation:   poly.ActivationLinear,
 		}
 		l.Network.EnableMultiCoreTiling = true
 		l.SyncToCPU()
@@ -469,14 +471,14 @@ func RunDenseGPUForward() {
 		defer outputBuf.Destroy()
 
 		// Warmup
-		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, 32)
+		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, scTile)
 		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, scTile)
 		ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, mcTile)
 		ctx.Device.Poll(true, nil)
 
 		start = time.Now()
 		for i := 0; i < gpuIters; i++ {
-			ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, 32)
+			ctx.DispatchDense(batchSize, inputSize, outputSize, inputBuf, weightBuf, outputBuf, scTile)
 		}
 		ctx.Device.Poll(true, nil)
 		tGPUNorm := time.Since(start) / time.Duration(gpuIters)
@@ -522,7 +524,7 @@ func RunDenseGPUForward() {
 	}
 
 	fmt.Printf("| %-10s | %-4s | %-12s | %-12s | %-12s | %-12s | %-6s | %-6s | %-6s | %-8s | %-8s | %-8s | %-6s | %-6s | %-6s |\n",
-		"DType", "Tile", "CPU MC", "GPU Norm(32)", "GPU SC", "GPU MC",
+		"DType", "Tile", "CPU MC", "GPU (GN)", "GPU SC", "GPU MC",
 		"GN-Spd", "SC-Spd", "MC-Spd", "Diff-GN", "Diff-SC", "Diff-MC", "GN-Par", "SC-Par", "MC-Par")
 	fmt.Println("|------------|------|--------------|--------------|--------------|--------------|--------|--------|--------|----------|----------|----------|--------|--------|--------|")
 
