@@ -171,11 +171,11 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		if diffSC > 1e-10 || diffMC > 1e-10 || diffGN >= cfg.tolerance || diffGSC > 1e-10 || diffGMC > 1e-10 {
 			allPass = false
 		}
-		stats.Add(diffSC, 1e-10)
-		stats.Add(diffMC, 1e-10)
-		stats.Add(diffGN, cfg.tolerance)
-		stats.Add(diffGSC, 1e-10)
-		stats.Add(diffGMC, 1e-10)
+		stats.AddSpectrum(spectrumMark(diffSC, 1e-10, postSC.Data, postCPU.Data))
+		stats.AddSpectrum(spectrumMark(diffMC, 1e-10, postMC.Data, postCPU.Data))
+		stats.AddSpectrum(spectrumMark(diffGN, cfg.tolerance, gpuNormData, postCPU.Data))
+		stats.AddSpectrum(spectrumMark(diffGSC, 1e-10, gpuSCData, postCPU.Data))
+		stats.AddSpectrum(spectrumMark(diffGMC, 1e-10, gpuMCData, postCPU.Data))
 	}
 	return allPass
 }
@@ -289,22 +289,24 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		okSC := dxDiffSC < cfg.tolerance*5 && dwDiffSC < cfg.tolerance*5
 		okMC := dxDiffMC < cfg.tolerance*5 && dwDiffMC < cfg.tolerance*5
 
+		mN := spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10, gDXN, cpuDX.Data)
+		mSC := spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10, gDXSC, cpuDX.Data)
+		mMC := spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10, gDXMC, cpuDX.Data)
+
 		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-7.1fx | %-7.1fx | %-7.1fx | %-9.2e | %-9.2e | %-9.2e | %-9.2e | %-8s | %-8s | %-8s |\n",
 			cfg.name, l.GetCPUTileSize(cfg.dtype), tCPUMC, tGPUNorm, tGPUSC, tGPUMC,
 			float64(tCPUMC)/float64(tGPUNorm),
 			float64(tCPUMC)/float64(tGPUSC),
 			float64(tCPUMC)/float64(tGPUMC),
 			dxDiffN, dwDiffN, dxDiffSC, dwDiffSC,
-			spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10, gDXN, cpuDX.Data),
-			spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10, gDXSC, cpuDX.Data),
-			spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10, gDXMC, cpuDX.Data))
+			mN, mSC, mMC)
 
 		if !okN || !okSC || !okMC {
 			allPass = false
 		}
-		stats.Add(dxDiffN+dwDiffN, cfg.tolerance*10)
-		stats.Add(dxDiffSC+dwDiffSC, cfg.tolerance*10)
-		stats.Add(dxDiffMC+dwDiffMC, cfg.tolerance*10)
+		stats.AddSpectrum(mN)
+		stats.AddSpectrum(mSC)
+		stats.AddSpectrum(mMC)
 	}
 	return allPass
 }
@@ -339,7 +341,7 @@ func runSaveReloadSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 	} else {
 		fmt.Printf("FAIL (Diff: %.2e, Weights: %v)\n", diff, weightsMatch)
 	}
-	stats.Add(diff, 1e-6)
+	stats.AddSpectrum(spectrumMark(diff, 1e-6, post1.Data, post2.Data))
 	return ok
 }
 
@@ -400,7 +402,9 @@ func runTrainingSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 					poly.SyncWeightsFromGPU(l.Network)
 				}
 				wt := l.WeightStore.Master
-				trainOK = maxAbsDiff(wt, w0) > 0
+				trainNoNaN := !math.IsNaN(res.FinalLoss) && !math.IsNaN(res.LossHistory[0])
+				trainImproved := res.FinalLoss < res.LossHistory[0]
+				trainOK = trainNoNaN && trainImproved
 
 				js, _ := poly.SerializeNetwork(l.Network)
 				net2, _ := poly.DeserializeNetwork(js)
@@ -432,14 +436,14 @@ func runTrainingSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 			}
 
 			if trainOK {
-				stats.Add(0, 0)
+				stats.AddSpectrum(SpecExact)
 			} else {
-				stats.Add(1.0, 0)
+				stats.AddSpectrum(SpecBroken)
 			}
 			if saveOK {
-				stats.Add(0, 0)
+				stats.AddSpectrum(SpecExact)
 			} else {
-				stats.Add(1.0, 0)
+				stats.AddSpectrum(SpecBroken)
 			}
 		}
 		fmt.Println("|------------|---------------|------------|------------|----------|---------|-------------|----------|----------|")
