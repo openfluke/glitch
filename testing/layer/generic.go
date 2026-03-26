@@ -162,8 +162,10 @@ func runForwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-8.2e | %-8.2e | %-8.2e | %-8.2e | %-8s | %-8s | %-8s | %-8s |\n",
 			cfg.name, r.TileSize, r.TCPUMC, r.TGPUNorm, r.TGPUSC, r.TGPUMC,
 			diffCP, r.DiffGN, r.DiffGSC, r.DiffGMC,
-			spectrumMark(diffCP, 1e-10), spectrumMark(r.DiffGN, cfg.tolerance), 
-			spectrumMark(r.DiffGSC, 1e-10), spectrumMark(r.DiffGMC, 1e-10))
+			spectrumMark(diffCP, 1e-10, postBaseline.Data, postBaseline.Data),
+			spectrumMark(r.DiffGN, cfg.tolerance, gpuNormData, postBaseline.Data),
+			spectrumMark(r.DiffGSC, 1e-10, gpuSCData, postBaseline.Data),
+			spectrumMark(r.DiffGMC, 1e-10, gpuMCData, postBaseline.Data))
 
 		if !r.ParityGN || !r.ParityGSC || !r.ParityGMC || diffCP > 1e-10 { allPass = false }
 		stats.Add(diffCP, 1e-10)
@@ -262,9 +264,9 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-7.1fx | %-7.1fx | %-7.1fx | %-9.2e | %-9.2e | %-9.2e | %-9.2e | %-8s | %-8s | %-8s |\n",
 			cfg.name, l.GetCPUTileSize(cfg.dtype), time.Second, tGPUNorm, tGPUSC, tGPUMC, // Dummy CPU time for now
 			1.0, 1.0, 1.0, dxDiffN, dwDiffN, dxDiffSC, dwDiffSC, 
-			spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10), 
-			spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10), 
-			spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10))
+			spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10, gDXN, cpuDX.Data), 
+			spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10, gDXSC, cpuDX.Data), 
+			spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10, gDXMC, cpuDX.Data))
 		
 		if !okN || !okSC || !okMC { allPass = false }
 		stats.Add(dxDiffN+dwDiffN, cfg.tolerance*10)

@@ -62,13 +62,70 @@ func maxAbsDiff(a, b []float32) float64 {
 	return d
 }
 
-func spectrumMark(diff float64, tolerance float64) string {
-	if math.IsNaN(diff) || math.IsInf(diff, 0) { return "💀 FATAL" }
-	if diff == 0 { return "💎 EXACT" }
-	if diff <= tolerance { return "✅ INDUS" }
-	if diff <= tolerance*10 { return "🟨 LOWBIT" }
-	if diff <= 0.1 { return "🟠 DRIFT" }
+func spectrumMark(diff float64, tolerance float64, data []float32, baseline []float32) string {
+	if math.IsNaN(diff) || math.IsInf(diff, 0) {
+		return "💀 FATAL"
+	}
+
+	// Check for dead signal in either
+	actualSig := hasSignal(data)
+	baseSig := hasSignal(baseline)
+	if !actualSig && !baseSig {
+		return "👻 DEAD" // Both are dead, consider it "dead but consistent"
+	}
+	if !actualSig || !baseSig {
+		return "❌ BROKE" // One is dead, the other isn't
+	}
+
+	if diff == 0 {
+		return "💎 EXACT"
+	}
+	if diff <= tolerance {
+		return "✅ INDUS"
+	}
+	if diff <= tolerance*10 {
+		return "🟨 LOWBIT"
+	}
+	if diff <= 0.1 {
+		return "🟠 DRIFT"
+	}
 	return "❌ BROKE"
+}
+
+func checkSignalLoss(baseline, actual []float32) bool {
+	if len(actual) == 0 && len(baseline) > 0 {
+		return true
+	}
+	if len(actual) == 0 {
+		return false
+	}
+
+	actualSignal := false
+	for _, v := range actual {
+		if v != 0 && !math.IsNaN(float64(v)) {
+			actualSignal = true
+			break
+		}
+	}
+	if actualSignal {
+		return false
+	}
+
+	baselineSignal := false
+	for _, v := range baseline {
+		if v != 0 {
+			baselineSignal = true
+			break
+		}
+	}
+	return baselineSignal // True if baseline had signal but actual is dead
+}
+
+func hasSignal(data []float32) bool {
+	for _, v := range data {
+		if v != 0 && !math.IsNaN(float64(v)) { return true }
+	}
+	return false
 }
 
 // rawF32 returns the active weight buffer as []float32 without applying scale.
