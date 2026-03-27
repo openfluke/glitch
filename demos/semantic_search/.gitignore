@@ -1,0 +1,7 @@
+# Semantic Search Demo artifacts
+glove.6B.zip
+glove.6B*.txt
+glove_300d.safetensors
+vocab.txt
+converter/glove.6B.zip
+converter/glove.6B*.txt
