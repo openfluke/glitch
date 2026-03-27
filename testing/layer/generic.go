@@ -290,9 +290,12 @@ func runBackwardSuite(spec TestSpec, l *poly.VolumetricLayer) bool {
 		okSC := dxDiffSC < cfg.tolerance*5 && dwDiffSC < cfg.tolerance*5
 		okMC := dxDiffMC < cfg.tolerance*5 && dwDiffMC < cfg.tolerance*5
 
-		mN := spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10, gDXN, cpuDX.Data)
-		mSC := spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10, gDXSC, cpuDX.Data)
-		mMC := spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10, gDXMC, cpuDX.Data)
+		// Use combined dX+dW for dead-signal detection so that types where CPU dX is
+		// legitimately zero (e.g. embeddings, integer truncation) but dW is non-zero
+		// are not falsely classified as SpecBroken.
+		mN := spectrumMark(dxDiffN+dwDiffN, cfg.tolerance*10, append(gDXN, gDWN...), append(cpuDX.Data, cpuDW.Data...))
+		mSC := spectrumMark(dxDiffSC+dwDiffSC, cfg.tolerance*10, append(gDXSC, gDWSC...), append(cpuDX.Data, cpuDW.Data...))
+		mMC := spectrumMark(dxDiffMC+dwDiffMC, cfg.tolerance*10, append(gDXMC, gDWMC...), append(cpuDX.Data, cpuDW.Data...))
 
 		fmt.Printf("| %-10s | %-4d | %-12v | %-12v | %-12v | %-12v | %-7.1fx | %-7.1fx | %-7.1fx | %-9.2e | %-9.2e | %-9.2e | %-9.2e | %-8s | %-8s | %-8s |\n",
 			cfg.name, l.GetCPUTileSize(cfg.dtype), tCPUMC, tGPUNorm, tGPUSC, tGPUMC,

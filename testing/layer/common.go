@@ -71,11 +71,14 @@ func spectrumMark(diff float64, tolerance float64, data []float32, baseline []fl
 	actualSig := hasSignal(data)
 	baseSig := hasSignal(baseline)
 	if !actualSig && !baseSig {
-		return SpecExact // Both are dead, consider it "dead but consistent" - wait, SpecExact? 
-		// Actually SpecExact implies diff=0. If both are dead, they match.
+		// Both dead — consistent (no signal on either side)
+		return SpecExact
 	}
 	if !actualSig || !baseSig {
-		return SpecBroken // One is dead, the other isn't (literal breakage)
+		// One side dead, other isn't — severe mismatch but not necessarily a crash.
+		// Use HeavyDrift so it shows up in the drift bucket rather than masking real
+		// breakages (NaN/Inf) inside the Broken bucket.
+		return SpecHeavyDrift
 	}
 
 	if diff == 0 {
