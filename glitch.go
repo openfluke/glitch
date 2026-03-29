@@ -258,7 +258,7 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 		fmt.Printf("  [%d] %s\n", i+1, model)
 	}
 
-	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
+	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [0]: ", "0")
 	deterministic = detInput == "1"
 
 	useTiling := true
@@ -283,11 +283,13 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	}
 
 	if useGPU {
-		fmt.Print("💎 Weight Precision? (4=Q4_0 / 32=FP32) [4]: ")
+		fmt.Print("💎 Weight Precision? (4=Q4_0 / 8=INT8 / 32=FP32) [4]: ")
 		input, _ = reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 		if input == "32" {
 			weightDType = poly.DTypeFloat32
+		} else if input == "8" {
+			weightDType = poly.DTypeInt8
 		} else {
 			weightDType = poly.DTypeInt4
 		}
@@ -297,6 +299,11 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	var selectedIdx int
 	fmt.Sscanf(modelInput, "%d", &selectedIdx)
 	modelName := models[selectedIdx-1]
+	template := templateForModel(modelName)
+	activeSystemPrompt := defaultSystemPromptForModel(modelName)
+	if deterministic && strings.Contains(strings.ToLower(modelName), "instruct") && strings.Contains(strings.ToLower(modelName), "1.7b") {
+		fmt.Println("⚠️  Deterministic=1 can collapse into punctuation-only outputs on 1.7B instruct models. Use Deterministic=0 for normal chat quality.")
+	}
 
 	// Snapshots...
 	modelDir := filepath.Join(hubDir, "models--"+strings.ReplaceAll(modelName, "/", "--"), "snapshots")
@@ -361,6 +368,16 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	if v, ok := config["rope_theta"]; ok {
 		ropeFreqBase = v.(float64)
 	}
+	if useGPU && useTiling && hiddenSize >= 1536 {
+		fmt.Printf("⚠️  Large model detected (hidden=%d). Tiled GPU path can destabilize logits here; forcing Standard Forward.\n", hiddenSize)
+		useTiling = false
+		tilingMode = "1"
+		tileSize = 0
+	}
+	if useGPU && hiddenSize >= 1536 && weightDType == poly.DTypeInt4 {
+		fmt.Printf("⚠️  Large model detected (hidden=%d). Q4 can degrade output quality; promoting weight precision to INT8.\n", hiddenSize)
+		weightDType = poly.DTypeInt8
+	}
 
 	net := poly.NewVolumetricNetwork(1, 1, 1, numLayers*4)
 	for b := 0; b < numLayers; b++ {
@@ -397,7 +414,7 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 
 	poly.LoadWithPrefixes(net, allTensors)
 
-	tr = poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
+	tr = poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, template)
 	if useTiling {
 		tr.EnableTiling(tileSize)
 	}
@@ -408,7 +425,11 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 			fmt.Printf("❌ Failed: %v\n", err)
 		} else {
 			for i := range tr.Network.Layers {
-				tr.Network.Layers[i].DType = weightDType
+				if tr.Network.Layers[i].Type == poly.LayerRMSNorm {
+					tr.Network.Layers[i].DType = poly.DTypeFloat32
+				} else {
+					tr.Network.Layers[i].DType = weightDType
+				}
 				(&tr.Network.Layers[i]).SyncToGPU()
 			}
 			tr.SyncToGPU()
@@ -423,6 +444,10 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 	}
 
 	fmt.Printf("\n✅ Model loaded! (%d layers)\n", numLayers)
+	bannedTokens := buildBannedTokens(tk, eosTokens)
+	if len(bannedTokens) > 0 {
+		fmt.Printf("🧯 Special-token mask active (%d banned IDs)\n", len(bannedTokens))
+	}
 
 	// Chat Loop
 	for {
@@ -439,13 +464,17 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 			temp = 0
 		}
 		opts := poly.GenOptions{
-			MaxTokens:         maxTokens,
-			Temperature:       temp,
-			TopK:              40,
-			Deterministic:     deterministic,
-			EOSTokens:         eosTokens,
-			RepetitionPenalty: 1.1,
-			RepetitionWindow:  64,
+			MaxTokens:             maxTokens,
+			MinTokens:             8,
+			Temperature:           temp,
+			TopK:                  40,
+			Deterministic:         deterministic,
+			EOSTokens:             eosTokens,
+			BannedTokens:          bannedTokens,
+			RepetitionPenalty:     1.1,
+			RepetitionWindow:      64,
+			MaxConsecutiveRepeats: 3,
+			NoRepeatNGram:         3,
 		}
 
 		encode := func(text string) []uint32 {
@@ -455,7 +484,7 @@ func runHuggingFaceMode(reader *bufio.Reader) {
 			return tk.Decode(tokens, false)
 		}
 
-		reply, _ := tr.Generate(encode, decode, chatTurns, systemPrompt, userMsg, opts)
+		reply, _ := tr.Generate(encode, decode, chatTurns, activeSystemPrompt, userMsg, opts)
 		fmt.Println()
 
 		chatTurns = append(chatTurns, poly.Turn{
@@ -667,11 +696,14 @@ func runAutomatedSmolLMTest(reader *bufio.Reader) {
 
 				maxGen := 50
 				opts := poly.GenOptions{
-					MaxTokens:     maxGen,
-					Temperature:   0.0, // deterministic
-					TopK:          1,
-					Deterministic: true,
-					Silent:        true,
+					MaxTokens:             maxGen,
+					MinTokens:             8,
+					Temperature:           0.0, // deterministic
+					TopK:                  1,
+					Deterministic:         true,
+					MaxConsecutiveRepeats: 3,
+					NoRepeatNGram:         3,
+					Silent:                true,
 				}
 
 				encode := func(text string) []uint32 { return tk.Encode(text, false) }
@@ -739,4 +771,53 @@ func loadEOSTokens(configPath string) []int {
 		return []int{2, 0}
 	}
 	return tokens
+}
+
+func templateForModel(modelName string) poly.Template {
+	name := strings.ToLower(modelName)
+	if strings.Contains(name, "llama-3") || strings.Contains(name, "smollm3") {
+		return poly.Llama3
+	}
+	return poly.ChatML
+}
+
+func buildBannedTokens(tk *poly.Tokenizer, eosTokens []int) []int {
+	if tk == nil {
+		return nil
+	}
+	eosSet := make(map[int]struct{}, len(eosTokens))
+	for _, tok := range eosTokens {
+		eosSet[tok] = struct{}{}
+	}
+	bannedSet := map[int]struct{}{}
+
+	for _, id := range tk.SpecialTokens {
+		if _, isEOS := eosSet[id]; isEOS {
+			continue
+		}
+		bannedSet[id] = struct{}{}
+	}
+
+	for token, id := range tk.AddedTokens {
+		if _, isEOS := eosSet[id]; isEOS {
+			continue
+		}
+		if _, isSpecial := tk.SpecialTokens[token]; isSpecial {
+			bannedSet[id] = struct{}{}
+		}
+	}
+
+	out := make([]int, 0, len(bannedSet))
+	for id := range bannedSet {
+		out = append(out, id)
+	}
+	return out
+}
+
+func defaultSystemPromptForModel(modelName string) string {
+	name := strings.ToLower(modelName)
+	if strings.Contains(name, "instruct") || strings.Contains(name, "qwen") || strings.Contains(name, "llama") || strings.Contains(name, "smollm") {
+		return "You are a helpful assistant. Be concise, coherent, and avoid repetition."
+	}
+	return ""
 }
